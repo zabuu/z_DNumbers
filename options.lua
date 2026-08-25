@@ -2,7 +2,7 @@ local Z = zDNumbers
 
 local frame = CreateFrame("Frame", "zDNumbersOptions", UIParent)
 frame:SetWidth(500)
-frame:SetHeight(430)
+frame:SetHeight(510)
 frame:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
 frame:SetFrameStrata("DIALOG")
 frame:SetMovable(true)
@@ -47,6 +47,36 @@ Label("Attach outgoing MSBT damage to nameplates", -82)
 enabled:SetScript("OnClick", function() SetValue("enabled", this:GetChecked() and "1" or "0") end)
 controls.enabled = enabled
 
+local icons = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+icons:SetPoint("TOPLEFT", frame, "TOPLEFT", 35, -112)
+icons:SetWidth(24); icons:SetHeight(24)
+Label("Show subtle spell and attack source icons", -112)
+icons:SetScript("OnClick", function() SetValue("icons", this:GetChecked() and "1" or "0") end)
+controls.icons = icons
+
+local opacityLabel = Label("Icon opacity: 30%", -152)
+local opacity = CreateFrame("Slider", "zDNumbersIconOpacitySlider", frame, "OptionsSliderTemplate")
+opacity:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -147)
+opacity:SetWidth(160)
+opacity:SetHeight(16)
+opacity:SetMinMaxValues(0, 100)
+opacity:SetValueStep(1)
+if getglobal then
+  local low = getglobal("zDNumbersIconOpacitySliderLow")
+  local high = getglobal("zDNumbersIconOpacitySliderHigh")
+  local text = getglobal("zDNumbersIconOpacitySliderText")
+  if low then low:SetText("0%") end
+  if high then high:SetText("100%") end
+  if text then text:SetText("") end
+end
+opacity:SetScript("OnValueChanged", function()
+  local value = math.floor((tonumber(arg1) or this:GetValue() or 30) + .5)
+  opacityLabel:SetText("Icon opacity: " .. value .. "%")
+  if not this.zDNumbersUpdating then SetValue("icon_opacity", value) end
+end)
+controls.iconOpacity = opacity
+controls.iconOpacityLabel = opacityLabel
+
 local fields = {
   { "Horizontal offset", "x" },
   { "Vertical offset above health bar", "y" },
@@ -55,7 +85,7 @@ local fields = {
   { "Seconds before text begins fading", "fade" },
 }
 for i = 1, table.getn(fields) do
-  local y = -120 - (i - 1) * 38
+  local y = -190 - (i - 1) * 36
   Label(fields[i][1], y)
   local key = fields[i][2]
   local edit = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
@@ -73,9 +103,9 @@ for i = 1, table.getn(fields) do
   controls[key] = edit
 end
 
-Label("Text alignment", -310)
+Label("Text alignment", -372)
 local align = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-align:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -307)
+align:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -369)
 align:SetWidth(105); align:SetHeight(23)
 align:SetScript("OnClick", function()
   local current = Z.config.align or "CENTER"
@@ -84,7 +114,7 @@ align:SetScript("OnClick", function()
 end)
 controls.align = align
 
-local status = Label("", -345)
+local status = Label("", -409)
 status:SetWidth(420)
 controls.status = status
 
@@ -109,6 +139,12 @@ close:SetScript("OnClick", function() frame:Hide() end)
 function frame:Refresh()
   if not Z.config then return end
   controls.enabled:SetChecked(Z.config.enabled == "1")
+  controls.icons:SetChecked(Z.config.icons == "1")
+  local opacity = math.max(0, math.min(100, tonumber(Z.config.icon_opacity) or 30))
+  controls.iconOpacity.zDNumbersUpdating = true
+  controls.iconOpacity:SetValue(opacity)
+  controls.iconOpacity.zDNumbersUpdating = nil
+  controls.iconOpacityLabel:SetText("Icon opacity: " .. math.floor(opacity + .5) .. "%")
   for _, key in pairs({ "x", "y", "width", "height", "fade" }) do
     if not controls[key].zDNumbersEditing then controls[key]:SetText(Z.config[key] or "") end
   end

@@ -415,7 +415,9 @@ function MikSBTOpt.SetupDropdown(frameName, label, tooltip, clickFunc, options, 
   getglobal(frameName .. "Label"):SetText(label);
 
   -- Initialize the dropdown.
-  UIDropDownMenu_Initialize(associatedFrame, MikSBTOpt.DropdownInit);
+  UIDropDownMenu_Initialize(associatedFrame, function()
+   MikSBTOpt.DropdownInit(associatedFrame);
+  end);
  end
 end
 
@@ -467,18 +469,35 @@ end
 -- **********************************************************************************
 -- Called when a drop down menu is initialized (shown).
 -- **********************************************************************************
-function MikSBTOpt.DropdownInit()
+function MikSBTOpt.DropdownInit(dropdownFrame)
  local info = {};
 
- -- Check if the dropdown frame is the options frame and exit.
- local dropdownFrame = this;
- if (dropdownFrame:GetName() == OPTIONS_FRAME_NAME) then
+ -- UI replacements can initialize dropdowns while `this` still points at an
+ -- unrelated event frame, whose parent may be nil. Prefer the frame supplied
+ -- by SetupDropdown and otherwise resolve Blizzard's active dropdown menu.
+ if (not dropdownFrame or not dropdownFrame.menuOptions) then
+  local activeMenu = UIDROPDOWNMENU_INIT_MENU;
+  if (type(activeMenu) == "string") then
+   dropdownFrame = getglobal(activeMenu);
+  elseif (type(activeMenu) == "table" or type(activeMenu) == "userdata") then
+   dropdownFrame = activeMenu;
+  end
+ end
+
+ if (not dropdownFrame or not dropdownFrame.menuOptions) then
+  dropdownFrame = this;
+  if (dropdownFrame and not dropdownFrame.menuOptions and dropdownFrame.GetParent) then
+   dropdownFrame = dropdownFrame:GetParent();
+  end
+ end
+
+ if (not dropdownFrame or not dropdownFrame.GetName) then
   return;
  end
 
- -- Check if dropdownFrame is a button and not the actual dropdown itself.
- if (not dropdownFrame.menuOptions) then
-  dropdownFrame = this:GetParent();
+ -- Check if the dropdown frame is the options frame and exit.
+ if (dropdownFrame:GetName() == OPTIONS_FRAME_NAME) then
+  return;
  end
 
  -- Make sure there is dropdown data.

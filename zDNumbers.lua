@@ -3,6 +3,8 @@ zDNumbers = zDNumbers or {}
 local Z = zDNumbers
 local defaults = {
   enabled = "1",
+  icons = "1",
+  icon_opacity = "30",
   x = "0",
   y = "8",
   width = "120",
@@ -45,6 +47,7 @@ Z.defaults = defaults
 Z.Reset = ResetConfig
 
 local TEXT_SLOTS = 10
+local SOURCE_ICON_SCALE = .70
 local recordsByPlate = {}
 local recordsByUnit = {}
 local recordsByGuid = {}
@@ -58,6 +61,10 @@ local guidEventsEnabled
 local cachedWorldChildren = {}
 local cachedWorldChildCount = -1
 local nextPlateScan = 0
+local sourceSpellIcons = {}
+local sourceSpellbookScanned
+local sourceSpellLibrary
+local sourceSpellLibraryChecked
 local validFrameStrata = {
   BACKGROUND = true, LOW = true, MEDIUM = true, HIGH = true,
   DIALOG = true, FULLSCREEN = true, FULLSCREEN_DIALOG = true, TOOLTIP = true,
@@ -165,12 +172,183 @@ local function Alignment()
   return "BOTTOM", "CENTER"
 end
 
+local function SourceIconAlpha()
+  local opacity = tonumber(Z.config and Z.config.icon_opacity) or 30
+  return math.max(0, math.min(100, opacity)) / 100
+end
+
+local function CacheSourceSpellbook(bookType)
+  if not GetSpellName or not GetSpellTexture then return end
+  for index = 1, 512 do
+    local foundName, name = pcall(GetSpellName, index, bookType)
+    if not foundName or not name or name == "" then break end
+    local foundIcon, texture = pcall(GetSpellTexture, index, bookType)
+    if foundIcon and texture then sourceSpellIcons[string.lower(name)] = texture end
+  end
+end
+
+local function ResolveSourceIcon(animationEvent)
+  if animationEvent.Texture then return animationEvent.Texture end
+
+  local spellId = animationEvent.SpellID or animationEvent.SpellId or animationEvent.spellId
+  if spellId and C_Spell and C_Spell.GetSpellTexture then
+    local found, texture = pcall(C_Spell.GetSpellTexture, spellId)
+    if found and texture then return texture end
+  end
+  if spellId and GetSpellRecField and GetSpellIconTexture then
+    local foundId, iconId = pcall(GetSpellRecField, spellId, "spellIconID")
+    if foundId and iconId then
+      local foundIcon, texture = pcall(GetSpellIconTexture, iconId)
+      if foundIcon and texture then return texture end
+    end
+  end
+
+  local effectName = animationEvent.EffectName
+  if type(effectName) == "string" and effectName ~= "" then
+    local name = string.gsub(effectName, " %(%d+%)", "")
+    local key = string.lower(name)
+    if ICON_CACHE and ICON_CACHE[key] then return ICON_CACHE[key] end
+
+    if not sourceSpellbookScanned then
+      sourceSpellbookScanned = true
+      CacheSourceSpellbook(BOOKTYPE_SPELL or "spell")
+      CacheSourceSpellbook(BOOKTYPE_PET or "pet")
+    end
+    if sourceSpellIcons[key] then return sourceSpellIcons[key] end
+
+    if not sourceSpellLibraryChecked and AceLibrary then
+      sourceSpellLibraryChecked = true
+      local found, library = pcall(AceLibrary, "Babble-Spell-2.2")
+      if found then sourceSpellLibrary = library end
+    end
+    if sourceSpellLibrary and sourceSpellLibrary.GetSpellIcon then
+      local found, texture = pcall(sourceSpellLibrary.GetSpellIcon, sourceSpellLibrary, name)
+      if found and texture then
+        sourceSpellIcons[key] = texture
+        if ICON_CACHE then ICON_CACHE[key] = texture end
+        return texture
+      end
+    end
+
+    if MikSBT and MikSBT.FindItemIcon then
+      local found, first, _, third = pcall(MikSBT.FindItemIcon, name)
+      local texture = type(first) == "string" and first or third
+      if found and texture then
+        sourceSpellIcons[key] = texture
+        if ICON_CACHE then ICON_CACHE[key] = texture end
+        return texture
+      end
+    end
+
+    sourceSpellIcons[key] = "Interface\\Icons\\INV_Misc_QuestionMark"
+    return sourceSpellIcons[key]
+  end
+
+  local eventType = animationEvent.EventType
+  if type(eventType) == "string" and string.find(eventType, "PET", 1, true) then
+    return "Interface\\Icons\\Ability_Druid_Maul"
+  end
+  if GetInventoryItemTexture then
+    local found, texture = pcall(GetInventoryItemTexture, "player", 16)
+    if found and texture then return texture end
+  end
+  return "Interface\\Icons\\Ability_MeleeDamage"
+end
+
+local function SetSourceIconShown(item, shown)
+  if shown then item.icon:Show() else item.icon:Hide() end
+  if not item.iconPieces then return end
+  for i = 1, table.getn(item.iconPieces) do
+    if shown and item.roundedIcon then item.iconPieces[i]:Show()
+    else item.iconPieces[i]:Hide() end
+  end
+end
+
+local function SetSourceIconAlpha(item, alpha)
+  item.icon:SetAlpha(alpha)
+  if not item.iconPieces then return end
+  for i = 1, table.getn(item.iconPieces) do item.iconPieces[i]:SetAlpha(alpha) end
+end
+
+local function ConfigureRoundedSourceIcon(item, size)
+  if size < 6 then
+    item.roundedIcon = nil
+    item.icon:SetWidth(size)
+    item.icon:SetHeight(size)
+    if item.icon.SetTexCoord then item.icon:SetTexCoord(.08, .92, .08, .92) end
+    return
+  end
+
+  -- Vanilla textures cannot be alpha-masked. Stacking cropped strips produces
+  -- genuinely transparent, rounded corners while preserving the source art.
+  if not item.iconPieces then
+    item.iconPieces = {}
+    for i = 1, 4 do item.iconPieces[i] = item.frame:CreateTexture(nil, "BORDER") end
+  end
+
+  local corner = math.min(math.floor((size - 1) / 2),
+    math.max(2, math.floor(size * .20 + .5)))
+  local cap = math.max(1, math.floor(corner / 2))
+  local shoulder = corner - cap
+  local capInset = math.max(1, corner - 1)
+  local shoulderInset = math.max(1, math.floor(corner * .45 + .5))
+  local middle = size - corner * 2
+  local crop, span = .08, .84
+
+  item.roundedIcon = true
+  item.icon:SetWidth(size)
+  item.icon:SetHeight(middle)
+  if item.icon.SetTexCoord then
+    item.icon:SetTexCoord(crop, 1 - crop,
+      crop + span * corner / size, 1 - crop - span * corner / size)
+  end
+
+  local function ConfigurePiece(piece, point, relative, relativePoint, height, inset, top)
+    piece:ClearAllPoints()
+    piece:SetPoint(point, relative, relativePoint, 0, 0)
+    piece:SetWidth(size - inset * 2)
+    piece:SetHeight(height)
+    piece:SetTexture(item.iconTexture)
+    if piece.SetTexCoord then
+      piece:SetTexCoord(crop + span * inset / size, 1 - crop - span * inset / size,
+        crop + span * top / size, crop + span * (top + height) / size)
+    end
+  end
+
+  local topShoulder, topCap = item.iconPieces[1], item.iconPieces[2]
+  local bottomShoulder, bottomCap = item.iconPieces[3], item.iconPieces[4]
+  ConfigurePiece(topShoulder, "BOTTOM", item.icon, "TOP", shoulder, shoulderInset, cap)
+  ConfigurePiece(topCap, "BOTTOM", topShoulder, "TOP", cap, capInset, 0)
+  ConfigurePiece(bottomShoulder, "TOP", item.icon, "BOTTOM", shoulder,
+    shoulderInset, size - corner)
+  ConfigurePiece(bottomCap, "TOP", bottomShoulder, "BOTTOM", cap,
+    capInset, size - cap)
+end
+
+local function ConfigureSourceIcon(item)
+  if not item or not item.icon then return end
+  if not item.active or not item.iconTexture or not Z.config or Z.config.icons ~= "1" then
+    SetSourceIconShown(item, false)
+    return
+  end
+
+  local size = math.max(1, math.floor((item.fontSize or 12) * SOURCE_ICON_SCALE + .5))
+  item.icon:ClearAllPoints()
+  item.icon:SetPoint("RIGHT", item.text, "LEFT", 2, 0)
+  item.icon:SetTexture(item.iconTexture)
+  ConfigureRoundedSourceIcon(item, size)
+  local alpha = item.text.GetAlpha and item.text:GetAlpha() or 1
+  SetSourceIconAlpha(item, alpha * SourceIconAlpha())
+  SetSourceIconShown(item, true)
+end
+
 local function ClearAnimations(record)
   if not record or not record.frame then return end
   for i = 1, TEXT_SLOTS do
     local item = record.frame.items[i]
     item.active = nil
     item.text:Hide()
+    SetSourceIconShown(item, false)
   end
   record.frame:Hide()
 end
@@ -277,8 +455,13 @@ local function CreateRecord(base)
   local frame = CreateFrame("Frame", nil, base)
   frame.items = {}
   for i = 1, TEXT_SLOTS do
-    local item = { text = frame:CreateFontString(nil, "ARTWORK", "GameFontNormal") }
+    local item = {
+      text = frame:CreateFontString(nil, "ARTWORK", "GameFontNormal"),
+      icon = frame:CreateTexture(nil, "BORDER"),
+      frame = frame,
+    }
     item.text:Hide()
+    item.icon:Hide()
     frame.items[i] = item
   end
   frame:Hide()
@@ -459,6 +642,7 @@ local function QueueGuidHint(targetGuid, amount, spellId)
     guid = targetGuid,
     amount = amount and tonumber(amount) or nil,
     effectName = effectName,
+    spellId = spellId,
     isSpell = spellId ~= nil,
     time = now,
   })
@@ -472,6 +656,7 @@ local function ConsumeGuidHint(animationEvent)
     local hint = outgoingGuidHints[i]
     if now - hint.time <= 1.5 and hint.amount == amount and hint.isSpell == isSpell and
         (not hint.effectName or not animationEvent.EffectName or hint.effectName == animationEvent.EffectName) then
+      if hint.spellId and not animationEvent.SpellID then animationEvent.SpellID = hint.spellId end
       table.remove(outgoingGuidHints, i)
       return hint.guid
     end
@@ -549,6 +734,8 @@ local function AddAnimation(record, animationEvent)
   slot.startTime = now
   slot.lastUpdate = now
   slot.position = 0
+  slot.fontSize = size
+  slot.iconTexture = ResolveSourceIcon(animationEvent)
   slot.text:ClearAllPoints()
   slot.text:SetPoint(anchor, frame, anchor, 0, 0)
   slot.text:SetJustifyH(justify)
@@ -558,6 +745,7 @@ local function AddAnimation(record, animationEvent)
   slot.text:SetText(animationEvent.Text)
   slot.text:SetAlpha(1)
   slot.text:Show()
+  ConfigureSourceIcon(slot)
   frame:Show()
 end
 
@@ -577,6 +765,7 @@ local function UpdateAnimations(record, now)
   local travelTime = height / speed
   local fadeTime = travelTime - fadeDelay
   local anchor, justify = Alignment()
+  local iconAlpha = SourceIconAlpha()
   local anyActive
 
   for i = 1, TEXT_SLOTS do
@@ -588,6 +777,7 @@ local function UpdateAnimations(record, now)
       if item.position >= height then
         item.active = nil
         item.text:Hide()
+        SetSourceIconShown(item, false)
       else
         anyActive = true
         local alpha = 1
@@ -599,6 +789,7 @@ local function UpdateAnimations(record, now)
         item.text:SetPoint(anchor, frame, anchor, 0, item.position)
         item.text:SetJustifyH(justify)
         item.text:SetAlpha(alpha)
+        if item.icon:IsShown() then SetSourceIconAlpha(item, alpha * iconAlpha) end
       end
     end
   end
@@ -631,6 +822,10 @@ function Z.Refresh()
   for record in pairs(visibleRecords) do
     ConfigureRecord(record)
     if not Enabled() then ClearAnimations(record) end
+    for i = 1, TEXT_SLOTS do ConfigureSourceIcon(record.frame.items[i]) end
+  end
+  for record in pairs(fadingRecords) do
+    for i = 1, TEXT_SLOTS do ConfigureSourceIcon(record.frame.items[i]) end
   end
   if Z.options and Z.options.Refresh then Z.options:Refresh() end
 end
@@ -651,6 +846,7 @@ for _, eventName in pairs({
   "AUTO_ATTACK_SELF", "AUTO_ATTACK_OTHER",
   "SPELL_DAMAGE_EVENT_SELF", "SPELL_DAMAGE_EVENT_OTHER",
   "SPELL_MISS_SELF", "SPELL_MISS_OTHER",
+  "SPELLS_CHANGED", "LEARNED_SPELL_IN_TAB", "PET_BAR_UPDATE", "UNIT_PET",
 }) do pcall(eventFrame.RegisterEvent, eventFrame, eventName) end
 
 eventFrame:SetScript("OnEvent", function()
@@ -676,6 +872,11 @@ eventFrame:SetScript("OnEvent", function()
     return
   elseif event == "NAME_PLATE_UNIT_REMOVED" then
     DetachNameplate(recordsByUnit[arg1])
+    return
+  elseif event == "SPELLS_CHANGED" or event == "LEARNED_SPELL_IN_TAB"
+      or event == "PET_BAR_UPDATE" or event == "UNIT_PET" then
+    sourceSpellIcons = {}
+    sourceSpellbookScanned = nil
     return
   elseif event == "AUTO_ATTACK_SELF" then
     QueueGuidHint(arg2, arg3 and arg3 > 0 and arg3 or nil, nil)
