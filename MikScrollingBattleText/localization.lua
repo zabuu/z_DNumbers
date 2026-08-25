@@ -11,7 +11,7 @@ MikSBT = {};
 -- Mod Constants
 -------------------------------------------------------------------------------
 
-MikSBT.MOD_NAME		= "zDNumbers"
+MikSBT.MOD_NAME		= "z_DNumbers"
 MikSBT.VERSION_NUMBER	= 4.7;
 MikSBT.VERSION_STRING	= "v4.7 OctoWoW";
 MikSBT.WINDOW_TITLE	= "Mik's Scrolling Battle Text " .. MikSBT.VERSION_STRING .. " - \124cffF58CBA\124hAthene Edit\124h\124r";
@@ -132,7 +132,7 @@ end
 -- The MSBT runtime is embedded inside zDNumbers rather than installed as a
 -- sibling addon. Keep the original font table and redirect only its addon path.
 for _, fontInfo in MikSBT.AVAILABLE_FONTS do
- fontInfo.Path = string.gsub(fontInfo.Path, "Interface\\Addons\\MikScrollingBattleText\\", "Interface\\Addons\\zDNumbers\\MikScrollingBattleText\\");
+ fontInfo.Path = string.gsub(fontInfo.Path, "Interface\\Addons\\MikScrollingBattleText\\", "Interface\\Addons\\z_DNumbers\\MikScrollingBattleText\\");
 end
 
 -- Holds the available font outlines.

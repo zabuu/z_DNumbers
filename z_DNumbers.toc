@@ -3,7 +3,7 @@
 ## Author: zDNumbers contributors; MSBT by Mikord
 ## Notes: MSBT-powered outgoing damage attached to any visible nameplate.
 ## Version: 1.0.0
-## OptionalDeps: zNameplates, pfUI, SW_FixLogStrings
+## OptionalDeps: z_Nameplates, pfUI, SW_FixLogStrings
 ## SavedVariables: MikSBT_Save
 ## SavedVariablesPerCharacter: zDNumbersDB
 

@@ -1388,7 +1388,7 @@
     </Offset>
    </Anchor>
   </Anchors>
-  <Backdrop bgFile="Interface\AddOns\zDNumbers\MikScrollingBattleText\Artwork\PlainBackdrop.tga" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+  <Backdrop bgFile="Interface\AddOns\z_DNumbers\MikScrollingBattleText\Artwork\PlainBackdrop.tga" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
    <EdgeSize>
     <AbsValue val="16" />
    </EdgeSize>
@@ -1594,7 +1594,7 @@
    </Anchor>
   </Anchors>
   <TitleRegion setAllPoints="true" />
-  <Backdrop bgFile="Interface\AddOns\zDNumbers\MikScrollingBattleText\Artwork\PlainBackdrop.tga" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+  <Backdrop bgFile="Interface\AddOns\z_DNumbers\MikScrollingBattleText\Artwork\PlainBackdrop.tga" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
    <EdgeSize>
     <AbsValue val="16" />
    </EdgeSize>
@@ -1804,7 +1804,7 @@
     </Offset>
    </Anchor>
   </Anchors>
-  <Backdrop bgFile="Interface\AddOns\zDNumbers\MikScrollingBattleText\Artwork\PlainBackdrop.tga" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
+  <Backdrop bgFile="Interface\AddOns\z_DNumbers\MikScrollingBattleText\Artwork\PlainBackdrop.tga" edgeFile="Interface\DialogFrame\UI-DialogBox-Border" tile="true">
    <EdgeSize>
     <AbsValue val="16" />
    </EdgeSize>

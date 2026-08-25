@@ -1,4 +1,4 @@
-local L = AceLibrary("AceLocale-2.2"):new("zDNumbers")
+local L = AceLibrary("AceLocale-2.2"):new("z_DNumbers")
 
 L:RegisterTranslations("enUS", function()
 	return {

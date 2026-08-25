@@ -1807,7 +1807,7 @@ function MikSBT.AddAnimation(animationEvent)
   if MikSBT.CurrentProfile.ResistSound then
     if animationEvent.EffectName then
       if (string.find(animationEvent.EffectName, "Cone of Cold") or string.find(animationEvent.EffectName, "Frost Nova")) then
-        PlaySoundFile("Interface\\AddOns\\zDNumbers\\MikScrollingBattleText\\sounds\\Resist.mp3");
+        PlaySoundFile("Interface\\AddOns\\z_DNumbers\\MikScrollingBattleText\\sounds\\Resist.mp3");
       end
     end
   end

@@ -49,13 +49,29 @@ local recordsByPlate = {}
 local recordsByUnit = {}
 local recordsByGuid = {}
 local visibleRecords = {}
+local fadingRecords = {}
+local fadingRecordsByGuid = {}
+local recycledRecords = {}
 local outgoingGuidHints = {}
 local duplicateNameCursor = {}
 local guidEventsEnabled
+local cachedWorldChildren = {}
+local cachedWorldChildCount = -1
+local nextPlateScan = 0
+local validFrameStrata = {
+  BACKGROUND = true, LOW = true, MEDIUM = true, HIGH = true,
+  DIALOG = true, FULLSCREEN = true, FULLSCREEN_DIALOG = true, TOOLTIP = true,
+}
+
+local function SafeFrameStrata(frame)
+  local strata = frame and frame.GetFrameStrata and frame:GetFrameStrata()
+  return validFrameStrata[strata] and strata or "LOW"
+end
 
 local function IsStatusBar(object)
-  return object and object.GetValue and object.GetMinMaxValues
-    and object.GetStatusBarColor and object.SetStatusBarTexture
+  return object and ((object.GetObjectType and object:GetObjectType() == "StatusBar")
+    or (object.GetValue and object.GetMinMaxValues and object.GetStatusBarColor
+      and object.SetStatusBarTexture))
 end
 
 -- Prefer a host addon's exposed health bar, but make no assumptions about the
@@ -64,20 +80,29 @@ end
 local function FindHealthAnchor(base)
   if not base then return UIParent end
 
-  local candidates = {
-    base.nameplate and base.nameplate.health,
-    base.UnitFrame and base.UnitFrame.healthBar,
-    base.UnitFrame and base.UnitFrame.healthbar,
-    base.unitFrame and base.unitFrame.healthBar,
-    base.unitFrame and base.unitFrame.healthbar,
-    base.healthBar,
-    base.healthbar,
-  }
-  for i = 1, table.getn(candidates) do
-    if candidates[i] then return candidates[i] end
+  -- Do not put these in a sparse array: Lua 5.0/5.1 can stop at the first
+  -- missing entry, which skips ordinary Blizzard and third-party plate layouts.
+  if base.nameplate then
+    if base.nameplate.health then return base.nameplate.health end
+    if base.nameplate.healthBar then return base.nameplate.healthBar end
+    if base.nameplate.healthbar then return base.nameplate.healthbar end
   end
+  if base.UnitFrame then
+    if base.UnitFrame.healthBar then return base.UnitFrame.healthBar end
+    if base.UnitFrame.healthbar then return base.UnitFrame.healthbar end
+    if base.UnitFrame.health then return base.UnitFrame.health end
+  end
+  if base.unitFrame then
+    if base.unitFrame.healthBar then return base.unitFrame.healthBar end
+    if base.unitFrame.healthbar then return base.unitFrame.healthbar end
+    if base.unitFrame.health then return base.unitFrame.health end
+  end
+  if base.healthBar then return base.healthBar end
+  if base.healthbar then return base.healthbar end
+  if base.health then return base.health end
 
   if IsStatusBar(base) then return base end
+  if not base.GetChildren then return base end
   local children = { base:GetChildren() }
   for i = 1, table.getn(children) do
     if IsStatusBar(children[i]) then return children[i] end
@@ -93,6 +118,44 @@ local function FindHealthAnchor(base)
   end
 
   return base
+end
+
+local function PlateName(base, unit)
+  local visual = base and (base.nameplate or base.UnitFrame or base.unitFrame)
+  local nameText = visual and (visual.name or visual.Name
+    or (visual.original and visual.original.name))
+  if nameText and nameText.GetText then
+    local name = nameText:GetText()
+    if name and name ~= "" then return name end
+  end
+
+  if base and base.GetRegions then
+    local regions = { base:GetRegions() }
+    for i = 1, table.getn(regions) do
+      local region = regions[i]
+      if region and region.GetObjectType and region:GetObjectType() == "FontString"
+          and region.GetText then
+        local name = region:GetText()
+        if name and name ~= "" and not tonumber(name) then return name end
+      end
+    end
+  end
+
+  if unit and UnitName then
+    local ok, name = pcall(UnitName, unit)
+    if ok and name and name ~= "" then return name end
+  end
+end
+
+local function PlateGuid(base)
+  if not base or not base.GetName then return nil end
+
+  -- SuperWoW exposes a nameplate's actual unit GUID through GetName(1), even
+  -- when no addon has created a nameplateN unit token for the original plate.
+  local ok, guid = pcall(base.GetName, base, 1)
+  if ok and type(guid) == "string" and string.find(guid, "^0[xX]%x+$") then
+    return guid
+  end
 end
 
 local function Alignment()
@@ -112,9 +175,67 @@ local function ClearAnimations(record)
   record.frame:Hide()
 end
 
+local function RememberRecordPosition(record)
+  if not record or record.frozen or not record.frame then return end
+  local x, y = record.frame:GetCenter()
+  if not x or not y then return end
+
+  local frameScale = record.frame.GetEffectiveScale and record.frame:GetEffectiveScale() or 1
+  local parentScale = UIParent.GetEffectiveScale and UIParent:GetEffectiveScale() or 1
+  if parentScale <= 0 then parentScale = 1 end
+
+  record.screenX = x * frameScale / parentScale
+  record.screenY = y * frameScale / parentScale
+  record.screenScale = frameScale / parentScale
+  record.screenStrata = SafeFrameStrata(record.frame)
+end
+
+local function ReleaseFadingRecord(record)
+  if not record or not fadingRecords[record] then return end
+  fadingRecords[record] = nil
+  if record.guid and fadingRecordsByGuid[record.guid] == record then
+    fadingRecordsByGuid[record.guid] = nil
+  end
+  ClearAnimations(record)
+  record.base, record.anchor, record.unit, record.guid, record.name = nil, nil, nil, nil, nil
+  record.frozen, record.screenX, record.screenY = nil, nil, nil
+  record.screenScale, record.screenStrata = nil, nil
+  table.insert(recycledRecords, record)
+end
+
+local function FreezeRecord(record)
+  if not record or not record.frame then return end
+
+  local hasAnimations
+  for i = 1, TEXT_SLOTS do
+    if record.frame.items[i].active then hasAnimations = true; break end
+  end
+  if not hasAnimations then ClearAnimations(record); return end
+
+  RememberRecordPosition(record)
+  if not record.screenX or not record.screenY then ClearAnimations(record); return end
+
+  if recordsByPlate[record.base] == record then recordsByPlate[record.base] = nil end
+  record.frozen = true
+  fadingRecords[record] = true
+  if record.guid then fadingRecordsByGuid[record.guid] = record end
+
+  -- Nameplate frames are pooled and immediately move to another unit. Keep the
+  -- old text alive under UIParent at its final on-screen position instead.
+  local frame = record.frame
+  frame:SetParent(UIParent)
+  frame:SetScale(record.screenScale or 1)
+  frame:SetFrameStrata(record.screenStrata or "LOW")
+  frame:ClearAllPoints()
+  frame:SetPoint("CENTER", UIParent, "BOTTOMLEFT", record.screenX, record.screenY)
+  frame:Show()
+  return true
+end
+
 local function ConfigureRecord(record)
   if not record or not record.frame then return end
   local anchor = FindHealthAnchor(record.base)
+  local parent = anchor.GetParent and anchor:GetParent() or record.base
   local width = tonumber(Z.config.width) or 120
   local height = tonumber(Z.config.height) or 80
   local x = tonumber(Z.config.x) or 0
@@ -122,6 +243,15 @@ local function ConfigureRecord(record)
   if width < 20 then width = 20 end
   if height < 10 then height = 10 end
 
+  -- GudaPlates and similar replacements hide every unrecognized direct child
+  -- of the Blizzard plate. Live under their visible overlay instead.
+  if parent and record.frame.GetParent and record.frame:GetParent() ~= parent then
+    record.frame:SetParent(parent)
+  end
+  if record.frame.SetAlpha then record.frame:SetAlpha(1) end
+  if record.frame.SetFrameStrata then
+    record.frame:SetFrameStrata(SafeFrameStrata(parent or anchor))
+  end
   record.anchor = anchor
   record.frame:ClearAllPoints()
   record.frame:SetPoint("BOTTOM", anchor, "TOP", x, y)
@@ -132,6 +262,17 @@ local function ConfigureRecord(record)
 end
 
 local function CreateRecord(base)
+  local recycled = table.remove(recycledRecords)
+  if recycled then
+    recycled.base = base
+    recycled.frame:SetParent(base)
+    recycled.frame:SetScale(1)
+    recycled.frame:SetFrameStrata(SafeFrameStrata(base))
+    recordsByPlate[base] = recycled
+    ConfigureRecord(recycled)
+    return recycled
+  end
+
   local record = { base = base }
   local frame = CreateFrame("Frame", nil, base)
   frame.items = {}
@@ -145,6 +286,149 @@ local function CreateRecord(base)
   recordsByPlate[base] = record
   ConfigureRecord(record)
   return record
+end
+
+local function ResolvePlateUnit(base, unit, existing)
+  if unit then return unit end
+  if existing and existing.unit then return existing.unit end
+
+  local visual = base.nameplate or base.UnitFrame or base.unitFrame
+  return base.namePlateUnitToken or base.displayedUnit or base.unit
+    or (visual and (visual.namePlateUnitToken or visual.displayedUnit
+      or visual.unit or visual.cachedUnitStr))
+    or PlateGuid(base)
+end
+
+local function AttachNameplate(base, unit)
+  if not Z.config or not base then return end
+
+  local record = recordsByPlate[base]
+  unit = ResolvePlateUnit(base, unit, record)
+  local guid = PlateGuid(base)
+  if not guid and unit and UnitGUID then
+    local ok, resolvedGuid = pcall(UnitGUID, unit)
+    if ok then guid = resolvedGuid end
+  end
+  local name = PlateName(base, unit)
+  if not unit and not guid and not name then return end
+
+  local changed = record and ((record.guid and guid and record.guid ~= guid)
+    or (record.unit and unit and record.unit ~= unit)
+    or (not record.guid and not guid and record.name and name and record.name ~= name))
+  if changed then
+    visibleRecords[record] = nil
+    if record.unit and recordsByUnit[record.unit] == record then recordsByUnit[record.unit] = nil end
+    if record.guid and recordsByGuid[record.guid] == record then recordsByGuid[record.guid] = nil end
+    if FreezeRecord(record) then record.unit = nil; record = nil end
+  end
+
+  local wasVisible = record and visibleRecords[record]
+  record = record or CreateRecord(base)
+  if record.unit and record.unit ~= unit and recordsByUnit[record.unit] == record then
+    recordsByUnit[record.unit] = nil
+  end
+  if record.guid and record.guid ~= guid and recordsByGuid[record.guid] == record then
+    recordsByGuid[record.guid] = nil
+  end
+  record.unit, record.guid = unit, guid
+  record.name = name or record.name
+  if unit then recordsByUnit[unit] = record end
+  if guid then recordsByGuid[guid] = record end
+  visibleRecords[record] = true
+
+  if not wasVisible then ClearAnimations(record) end
+  if not wasVisible or record.anchor ~= FindHealthAnchor(base) then ConfigureRecord(record) end
+  return record
+end
+
+local function DetachNameplate(record)
+  if not record then return end
+  visibleRecords[record] = nil
+  if record.unit and recordsByUnit[record.unit] == record then recordsByUnit[record.unit] = nil end
+  if record.guid and recordsByGuid[record.guid] == record then recordsByGuid[record.guid] = nil end
+  record.unit = nil
+  if not FreezeRecord(record) then record.guid, record.name = nil, nil end
+end
+
+local function IsWorldNameplate(frame)
+  if not frame then return false end
+  if recordsByPlate[frame] then return true end
+  if frame.nameplate and (frame.nameplate.health or frame.nameplate.healthBar
+      or frame.nameplate.healthbar) then return true end
+  if not frame.GetRegions then return false end
+
+  local regions = { frame:GetRegions() }
+  for i = 1, table.getn(regions) do
+    local region = regions[i]
+    if region and region.GetObjectType and region:GetObjectType() == "Texture"
+        and region.GetTexture then
+      local texture = region:GetTexture()
+      if type(texture) == "string"
+          and string.find(string.lower(texture), "nameplate%-border") then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function ScanVisibleNameplates()
+  if not Z.config then return end
+
+  for record in pairs(visibleRecords) do
+    if record.base and record.base.IsShown and not record.base:IsShown() then
+      DetachNameplate(record)
+    end
+  end
+
+  if C_NamePlate and C_NamePlate.GetNamePlates then
+    local ok, plates = pcall(C_NamePlate.GetNamePlates)
+    if ok and type(plates) == "table" then
+      for _, plate in pairs(plates) do
+        if plate and (not plate.IsShown or plate:IsShown()) then AttachNameplate(plate) end
+      end
+    end
+  end
+
+  if C_NamePlate and C_NamePlate.GetNamePlateForUnit and UnitExists then
+    for i = 1, 40 do
+      local unit = "nameplate" .. i
+      if UnitExists(unit) then
+        local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+        if ok and plate then AttachNameplate(plate, unit) end
+      end
+    end
+
+    for _, unit in pairs({ "target", "mouseover" }) do
+      if UnitExists(unit) then
+        local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
+        if ok and plate and not recordsByPlate[plate] then AttachNameplate(plate, unit) end
+      end
+    end
+  elseif UnitNameplate and UnitExists then
+    for _, unit in pairs({ "target", "mouseover" }) do
+      if UnitExists(unit) then
+        local ok, plate = pcall(UnitNameplate, unit)
+        if ok and plate then AttachNameplate(plate, unit) end
+      end
+    end
+  end
+
+  -- Vanilla Blizzard plates, GudaPlates, and other legacy addons may never
+  -- publish NAME_PLATE_UNIT_ADDED. Their real frames still live on WorldFrame.
+  if WorldFrame and WorldFrame.GetChildren then
+    local childCount = WorldFrame.GetNumChildren and WorldFrame:GetNumChildren()
+    if not childCount or childCount ~= cachedWorldChildCount then
+      cachedWorldChildren = { WorldFrame:GetChildren() }
+      cachedWorldChildCount = childCount or table.getn(cachedWorldChildren)
+    end
+    for i = 1, table.getn(cachedWorldChildren) do
+      local plate = cachedWorldChildren[i]
+      if plate and (not plate.IsShown or plate:IsShown()) and IsWorldNameplate(plate) then
+        AttachNameplate(plate)
+      end
+    end
+  end
 end
 
 local function EnableGuidEvents()
@@ -195,15 +479,30 @@ local function ConsumeGuidHint(animationEvent)
 end
 
 local function FindRecord(unitName, targetGuid)
-  if targetGuid and recordsByGuid[targetGuid] then return recordsByGuid[targetGuid] end
+  if targetGuid then
+    -- A known target must never be reassigned solely because another plate has
+    -- the same name. Recently removed targets retain their frozen text frame.
+    local record = recordsByGuid[targetGuid] or fadingRecordsByGuid[targetGuid]
+    if record then return record end
+  end
   if not unitName or unitName == "" then return nil end
 
   local matches = {}
   for record in pairs(visibleRecords) do
-    if record.unit and UnitName(record.unit) == unitName then table.insert(matches, record) end
+    local name = record.name
+    if record.unit and UnitName then
+      local ok, unitNameNow = pcall(UnitName, record.unit)
+      if ok and unitNameNow and unitNameNow ~= "" then name = unitNameNow end
+    end
+    if name == unitName and (not targetGuid or not record.guid) then
+      table.insert(matches, record)
+    end
   end
   local count = table.getn(matches)
   if count == 0 then return nil end
+  -- GUID-bearing combat events may use a name-only legacy plate when that
+  -- plate is unambiguous, but never guess between same-named targets.
+  if targetGuid and count ~= 1 then return nil end
   if count == 1 then return matches[1] end
 
   -- Name-only combat messages cannot distinguish identical AoE targets. Rotate
@@ -216,7 +515,7 @@ end
 
 local function AddAnimation(record, animationEvent)
   if not record or not record.frame then return end
-  ConfigureRecord(record)
+  if not record.frozen then ConfigureRecord(record) end
   local frame = record.frame
   local now = GetTime()
   local slot, oldest
@@ -265,7 +564,10 @@ end
 local function UpdateAnimations(record, now)
   local frame = record and record.frame
   if not frame or not frame:IsShown() then return end
-  if not Enabled() then ClearAnimations(record); return end
+  if not Enabled() then
+    if record.frozen then ReleaseFadingRecord(record) else ClearAnimations(record) end
+    return
+  end
 
   local height = frame.configHeight or tonumber(Z.config.height) or 80
   local speed = tonumber(MikSBT.CurrentProfile.TextSpeed) or 75
@@ -300,13 +602,20 @@ local function UpdateAnimations(record, now)
       end
     end
   end
-  if not anyActive then frame:Hide() end
+  if not anyActive then
+    frame:Hide()
+    if record.frozen then ReleaseFadingRecord(record) end
+  end
 end
 
 local function HandleOutgoing(animationEvent)
   local targetGuid = animationEvent.TargetGUID or ConsumeGuidHint(animationEvent)
   if not MikSBT.PrepareExternalAnimationEvent(animationEvent) then return end
   local record = FindRecord(animationEvent.Name, targetGuid)
+  if not record then
+    ScanVisibleNameplates()
+    record = FindRecord(animationEvent.Name, targetGuid)
+  end
   if record then AddAnimation(record, animationEvent) end
 end
 
@@ -318,6 +627,7 @@ local function RegisterMSBTIntegration()
 end
 
 function Z.Refresh()
+  ScanVisibleNameplates()
   for record in pairs(visibleRecords) do
     ConfigureRecord(record)
     if not Enabled() then ClearAnimations(record) end
@@ -334,8 +644,8 @@ end
 local eventFrame = CreateFrame("Frame", "zDNumbersEventFrame", UIParent)
 eventFrame:RegisterEvent("ADDON_LOADED")
 eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:RegisterEvent("NAME_PLATE_UNIT_ADDED")
-eventFrame:RegisterEvent("NAME_PLATE_UNIT_REMOVED")
+pcall(eventFrame.RegisterEvent, eventFrame, "NAME_PLATE_UNIT_ADDED")
+pcall(eventFrame.RegisterEvent, eventFrame, "NAME_PLATE_UNIT_REMOVED")
 
 for _, eventName in pairs({
   "AUTO_ATTACK_SELF", "AUTO_ATTACK_OTHER",
@@ -344,41 +654,28 @@ for _, eventName in pairs({
 }) do pcall(eventFrame.RegisterEvent, eventFrame, eventName) end
 
 eventFrame:SetScript("OnEvent", function()
-  if event == "ADDON_LOADED" and arg1 == "zDNumbers" then
+  if event == "ADDON_LOADED" and arg1 == "z_DNumbers" then
     zDNumbersDB = type(zDNumbersDB) == "table" and zDNumbersDB or {}
     ImportLegacyConfig(zDNumbersDB)
     MergeDefaults(zDNumbersDB)
     Z.config = zDNumbersDB
     Z.EnsureEmbeddedMSBT()
     RegisterMSBTIntegration()
+    ScanVisibleNameplates()
     if Z.options and Z.options.Refresh then Z.options:Refresh() end
     return
   elseif event == "PLAYER_ENTERING_WORLD" then
     Z.EnsureEmbeddedMSBT()
     RegisterMSBTIntegration()
+    cachedWorldChildCount = -1
+    ScanVisibleNameplates()
     return
   elseif event == "NAME_PLATE_UNIT_ADDED" then
     local base = C_NamePlate and C_NamePlate.GetNamePlateForUnit and C_NamePlate.GetNamePlateForUnit(arg1)
-    if not base then return end
-    local record = recordsByPlate[base] or CreateRecord(base)
-    if record.unit and recordsByUnit[record.unit] == record then recordsByUnit[record.unit] = nil end
-    if record.guid and recordsByGuid[record.guid] == record then recordsByGuid[record.guid] = nil end
-    record.unit = arg1
-    record.guid = UnitGUID(arg1)
-    recordsByUnit[arg1] = record
-    if record.guid then recordsByGuid[record.guid] = record end
-    visibleRecords[record] = true
-    ClearAnimations(record)
-    ConfigureRecord(record)
+    if base then AttachNameplate(base, arg1) end
     return
   elseif event == "NAME_PLATE_UNIT_REMOVED" then
-    local record = recordsByUnit[arg1]
-    recordsByUnit[arg1] = nil
-    if not record then return end
-    visibleRecords[record] = nil
-    if record.guid and recordsByGuid[record.guid] == record then recordsByGuid[record.guid] = nil end
-    record.unit, record.guid = nil, nil
-    ClearAnimations(record)
+    DetachNameplate(recordsByUnit[arg1])
     return
   elseif event == "AUTO_ATTACK_SELF" then
     QueueGuidHint(arg2, arg3 and arg3 > 0 and arg3 or nil, nil)
@@ -398,5 +695,13 @@ end)
 eventFrame:SetScript("OnUpdate", function()
   if not Z.config then return end
   local now = GetTime()
-  for record in pairs(visibleRecords) do UpdateAnimations(record, now) end
+  if now >= nextPlateScan then
+    nextPlateScan = now + .25
+    ScanVisibleNameplates()
+  end
+  for record in pairs(visibleRecords) do
+    RememberRecordPosition(record)
+    UpdateAnimations(record, now)
+  end
+  for record in pairs(fadingRecords) do UpdateAnimations(record, now) end
 end)
