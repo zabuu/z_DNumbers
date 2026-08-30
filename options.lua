@@ -2,7 +2,7 @@ local Z = zDNumbers
 
 local frame = CreateFrame("Frame", "zDNumbersOptions", UIParent)
 frame:SetWidth(500)
-frame:SetHeight(510)
+frame:SetHeight(550)
 frame:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
 frame:SetFrameStrata("DIALOG")
 frame:SetMovable(true)
@@ -77,6 +77,31 @@ end)
 controls.iconOpacity = opacity
 controls.iconOpacityLabel = opacityLabel
 
+local tiltLabel = Label("Perspective depth: 12%", -190)
+local tilt = CreateFrame("Slider", "zDNumbersPerspectiveTiltSlider", frame, "OptionsSliderTemplate")
+tilt:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -185)
+tilt:SetWidth(160)
+tilt:SetHeight(16)
+tilt:SetMinMaxValues(0, 100)
+tilt:SetValueStep(1)
+if getglobal then
+  local low = getglobal("zDNumbersPerspectiveTiltSliderLow")
+  local high = getglobal("zDNumbersPerspectiveTiltSliderHigh")
+  local text = getglobal("zDNumbersPerspectiveTiltSliderText")
+  if low then low:SetText("Off") end
+  if high then high:SetText("Extreme") end
+  if text then text:SetText("") end
+end
+tilt:SetScript("OnValueChanged", function()
+  local value = math.floor((tonumber(arg1) or this:GetValue() or 12) + .5)
+  tiltLabel:SetText(value == 0 and "Perspective depth: Off"
+    or value >= 75 and "Perspective depth: EXTREME (" .. value .. "%)"
+    or "Perspective depth: " .. value .. "%")
+  if not this.zDNumbersUpdating then SetValue("perspective_tilt", value) end
+end)
+controls.perspectiveTilt = tilt
+controls.perspectiveTiltLabel = tiltLabel
+
 local fields = {
   { "Horizontal offset", "x" },
   { "Vertical offset above health bar", "y" },
@@ -85,7 +110,7 @@ local fields = {
   { "Seconds before text begins fading", "fade" },
 }
 for i = 1, table.getn(fields) do
-  local y = -190 - (i - 1) * 36
+  local y = -228 - (i - 1) * 36
   Label(fields[i][1], y)
   local key = fields[i][2]
   local edit = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
@@ -103,9 +128,9 @@ for i = 1, table.getn(fields) do
   controls[key] = edit
 end
 
-Label("Text alignment", -372)
+Label("Text alignment", -410)
 local align = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-align:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -369)
+align:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -407)
 align:SetWidth(105); align:SetHeight(23)
 align:SetScript("OnClick", function()
   local current = Z.config.align or "CENTER"
@@ -114,7 +139,7 @@ align:SetScript("OnClick", function()
 end)
 controls.align = align
 
-local status = Label("", -409)
+local status = Label("", -447)
 status:SetWidth(420)
 controls.status = status
 
@@ -145,6 +170,14 @@ function frame:Refresh()
   controls.iconOpacity:SetValue(opacity)
   controls.iconOpacity.zDNumbersUpdating = nil
   controls.iconOpacityLabel:SetText("Icon opacity: " .. math.floor(opacity + .5) .. "%")
+  local tilt = math.max(0, math.min(100, tonumber(Z.config.perspective_tilt) or 12))
+  controls.perspectiveTilt.zDNumbersUpdating = true
+  controls.perspectiveTilt:SetValue(tilt)
+  controls.perspectiveTilt.zDNumbersUpdating = nil
+  controls.perspectiveTiltLabel:SetText(tilt == 0 and "Perspective depth: Off"
+    or tilt >= 75 and "Perspective depth: EXTREME ("
+      .. math.floor(tilt + .5) .. "%)"
+    or "Perspective depth: " .. math.floor(tilt + .5) .. "%")
   for _, key in pairs({ "x", "y", "width", "height", "fade" }) do
     if not controls[key].zDNumbersEditing then controls[key]:SetText(Z.config[key] or "") end
   end

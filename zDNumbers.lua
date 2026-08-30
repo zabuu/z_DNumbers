@@ -5,6 +5,7 @@ local defaults = {
   enabled = "1",
   icons = "1",
   icon_opacity = "30",
+  perspective_tilt = "12",
   x = "0",
   y = "8",
   width = "120",
@@ -50,6 +51,11 @@ local TEXT_SLOTS = 10
 local SOURCE_ICON_SCALE = .70
 local RESULT_ICON_SCALE = .70
 local ICON_TEXT_GAP = 3
+local NATIVE_MIN_SCALE = .65
+local NATIVE_MAX_SCALE = 1.50
+local NATIVE_DEFAULT_TRAVEL = 3
+local NATIVE_MAX_TRAVEL = 6
+local MAX_PERSPECTIVE_WARP = 100
 local GLANCING_RESULT_ICON = "Interface\\Icons\\Ability_Whirlwind"
 local PARRIED_RESULT_ICON = "Interface\\Icons\\Ability_Parry"
 local BLOCKED_RESULT_ICON = "Interface\\Icons\\Ability_Defend"
@@ -75,6 +81,11 @@ local validFrameStrata = {
   BACKGROUND = true, LOW = true, MEDIUM = true, HIGH = true,
   DIALOG = true, FULLSCREEN = true, FULLSCREEN_DIALOG = true, TOOLTIP = true,
 }
+
+local function SetTextPerspective(item, amount)
+  if not item or not item.text or type(zAPI) ~= "function" then return end
+  pcall(zAPI, "fontTrapezoid", item.text, tonumber(amount) or 0)
+end
 
 local function SafeFrameStrata(frame)
   local strata = frame and frame.GetFrameStrata and frame:GetFrameStrata()
@@ -176,6 +187,37 @@ local function Alignment()
   if align == "LEFT" then return "BOTTOMLEFT", "LEFT" end
   if align == "RIGHT" then return "BOTTOMRIGHT", "RIGHT" end
   return "BOTTOM", "CENTER"
+end
+
+local function NativeProject(record, verticalOffset)
+  if type(zAPI) ~= "function" or not record then return end
+  local identifier = record.guid or record.unit
+  if not identifier then return end
+  local ok, x, y, depth, worldX, worldY, worldZ =
+    pcall(zAPI, "projectUnit", identifier, verticalOffset or 0)
+  if not ok or type(x) ~= "number" or type(y) ~= "number"
+      or type(depth) ~= "number" or depth <= 0 then return end
+  return x, y, depth, worldX, worldY, worldZ
+end
+
+local function NativeWorldToScreen(x, y, z)
+  if type(zAPI) ~= "function" or type(x) ~= "number"
+      or type(y) ~= "number" or type(z) ~= "number" then return end
+  local ok, screenX, screenY, depth = pcall(zAPI, "worldToScreen", x, y, z)
+  if not ok or type(screenX) ~= "number" or type(screenY) ~= "number"
+      or type(depth) ~= "number" or depth <= 0 then return end
+  return screenX, screenY, depth
+end
+
+local function FrameBottomAnchor(frame, anchor)
+  if not frame then return end
+  local left = frame.GetLeft and frame:GetLeft()
+  local right = frame.GetRight and frame:GetRight()
+  local bottom = frame.GetBottom and frame:GetBottom()
+  if not left or not right or not bottom then return end
+  if anchor == "BOTTOMLEFT" then return left, bottom end
+  if anchor == "BOTTOMRIGHT" then return right, bottom end
+  return (left + right) * .5, bottom
 end
 
 local function SourceIconAlpha()
@@ -338,7 +380,8 @@ local function ConfigureSourceIcon(item)
     return
   end
 
-  local size = math.max(1, math.floor((item.fontSize or 12) * SOURCE_ICON_SCALE + .5))
+  local size = math.max(1, math.floor((item.visualSize or item.fontSize or 12)
+    * SOURCE_ICON_SCALE + .5))
   item.icon:ClearAllPoints()
   item.icon:SetPoint("RIGHT", item.text, "LEFT", -ICON_TEXT_GAP, 0)
   item.icon:SetTexture(item.iconTexture)
@@ -352,14 +395,15 @@ local function ConfigureResultIcon(item)
   local result = item and item.result
   if not result then return end
   result.active = item.active
-  result.fontSize = item.fontSize
+  result.fontSize = item.visualSize or item.fontSize
   result.iconTexture = item.resultIconTexture
   if not item.active or not result.iconTexture then
     SetSourceIconShown(result, false)
     return
   end
 
-  local size = math.max(1, math.floor((item.fontSize or 12) * RESULT_ICON_SCALE + .5))
+  local size = math.max(1, math.floor((item.visualSize or item.fontSize or 12)
+    * RESULT_ICON_SCALE + .5))
   result.icon:ClearAllPoints()
   result.icon:SetPoint("LEFT", item.text, "RIGHT", ICON_TEXT_GAP, 0)
   result.icon:SetTexture(result.iconTexture)
@@ -768,6 +812,33 @@ local function AddAnimation(record, animationEvent)
   slot.lastUpdate = now
   slot.position = 0
   slot.fontSize = size
+  slot.visualSize = size
+  slot.native3D = nil
+  slot.nativeTravel = nil
+  slot.nativeBaseX, slot.nativeBaseY, slot.nativeBaseZ = nil, nil, nil
+  slot.nativeCorrectionX, slot.nativeCorrectionY = nil, nil
+  slot.perspectiveWarp = 0
+  SetTextPerspective(slot, 0)
+
+  local baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ =
+    NativeProject(record, 0)
+  local raisedX, raisedY = NativeProject(record, 1)
+  if baseX and raisedX and UIParent and UIParent.GetWidth and UIParent.GetHeight then
+    local uiWidth = UIParent:GetWidth()
+    local uiHeight = UIParent:GetHeight()
+    local deltaX = (raisedX - baseX) * uiWidth
+    local deltaY = (raisedY - baseY) * uiHeight
+    local pixelsPerWorldUnit = math.sqrt(deltaX * deltaX + deltaY * deltaY)
+    local configuredHeight = frame.configHeight or tonumber(Z.config.height) or 80
+    local travel = NATIVE_DEFAULT_TRAVEL
+    if pixelsPerWorldUnit > 1 then travel = configuredHeight / pixelsPerWorldUnit end
+    travel = math.max(.5, math.min(NATIVE_MAX_TRAVEL, travel))
+    slot.native3D = true
+    slot.nativeTravel = travel
+    slot.nativeBaseDepth = baseDepth
+    slot.nativeBaseX, slot.nativeBaseY, slot.nativeBaseZ =
+      baseWorldX, baseWorldY, baseWorldZ
+  end
   slot.iconTexture = ResolveSourceIcon(animationEvent)
   slot.resultIconTexture = animationEvent.IsBlocked and BLOCKED_RESULT_ICON
     or animationEvent.IsParried and PARRIED_RESULT_ICON
@@ -775,7 +846,9 @@ local function AddAnimation(record, animationEvent)
   slot.text:ClearAllPoints()
   slot.text:SetPoint(anchor, frame, anchor, 0, 0)
   slot.text:SetJustifyH(justify)
-  slot.text:SetFont(font, math.max(1, size - 1), outline)
+  local fontSurfaceSize = slot.native3D
+    and math.floor(size * NATIVE_MAX_SCALE + .5) or size - 1
+  slot.text:SetFont(font, math.max(1, fontSurfaceSize), outline)
   slot.text:SetTextHeight(math.max(1, size))
   slot.text:SetTextColor(colorR, colorG, colorB)
   -- Full blocks and parries have no damage amount, so their result icon
@@ -792,9 +865,65 @@ end
 
 local function RetireAnimationItem(item)
   item.active = nil
+  item.native3D = nil
+  item.visualSize = nil
+  item.perspectiveWarp = nil
+  SetTextPerspective(item, 0)
   item.text:Hide()
   SetSourceIconShown(item, false)
   SetSourceIconShown(item.result, false)
+end
+
+local function NativeAnimationPlacement(record, item, anchor, height)
+  if not item.native3D or not UIParent or not UIParent.GetWidth
+      or not UIParent.GetHeight then return end
+  local progress = math.max(0, math.min(1, item.position / height))
+  local worldOffset = progress * (item.nativeTravel or NATIVE_DEFAULT_TRAVEL)
+
+  local baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ =
+    NativeProject(record, 0)
+  local pointX, pointY, pointDepth, pointWorldX, pointWorldY, pointWorldZ =
+    NativeProject(record, worldOffset)
+
+  if baseX and pointX then
+    item.nativeBaseX, item.nativeBaseY, item.nativeBaseZ =
+      baseWorldX, baseWorldY, baseWorldZ
+    item.nativePointX, item.nativePointY, item.nativePointZ =
+      pointWorldX, pointWorldY, pointWorldZ
+  elseif item.nativeBaseX and item.nativeBaseY and item.nativeBaseZ then
+    baseX, baseY, baseDepth = NativeWorldToScreen(
+      item.nativeBaseX, item.nativeBaseY, item.nativeBaseZ)
+    pointWorldX, pointWorldY = item.nativeBaseX, item.nativeBaseY
+    pointWorldZ = item.nativeBaseZ + worldOffset
+    pointX, pointY, pointDepth = NativeWorldToScreen(
+      pointWorldX, pointWorldY, pointWorldZ)
+    item.nativePointX, item.nativePointY, item.nativePointZ =
+      pointWorldX, pointWorldY, pointWorldZ
+  end
+  if not baseX or not pointX then return end
+
+  local uiWidth = UIParent:GetWidth()
+  local uiHeight = UIParent:GetHeight()
+  if not record.frozen then
+    local originX, originY = FrameBottomAnchor(record.frame, anchor)
+    if originX and originY then
+      item.nativeCorrectionX = originX - baseX * uiWidth
+      item.nativeCorrectionY = originY - baseY * uiHeight
+    end
+  end
+  if not item.nativeCorrectionX or not item.nativeCorrectionY then return end
+
+  local scale = baseDepth / pointDepth
+  scale = math.max(NATIVE_MIN_SCALE, math.min(NATIVE_MAX_SCALE, scale))
+  item.visualSize = (item.fontSize or 12) * scale
+
+  -- Keep the baseline camera-horizontal. zAPI reshapes each glyph quad into a
+  -- subtle trapezoid: narrower at the bottom and wider at the top.
+  local warp = tonumber(Z.config and Z.config.perspective_tilt) or 12
+  warp = math.max(0, math.min(MAX_PERSPECTIVE_WARP, warp))
+  item.perspectiveWarp = warp / 100
+  return pointX * uiWidth + item.nativeCorrectionX,
+    pointY * uiHeight + item.nativeCorrectionY
 end
 
 local function ResolveAnimationSpacing(frame, height)
@@ -832,7 +961,8 @@ local function ResolveAnimationSpacing(frame, height)
   for i = 1, count do
     local item = layout[i]
     if previous then
-      local minimumGap = ((previous.fontSize or 12) + (item.fontSize or 12)) * .5 + 4
+      local minimumGap = ((previous.fontSize or 12)
+        + (item.fontSize or 12)) * .5 + 4
       item.position = math.max(item.position, previous.position + minimumGap)
     end
     if item.position >= height then
@@ -889,9 +1019,26 @@ local function UpdateAnimations(record, now)
         if alpha < 0 then alpha = 0 end
       end
       item.text:ClearAllPoints()
-      item.text:SetPoint(anchor, frame, anchor, 0, item.position)
+      -- Restore the unwarped glyph vertices before a possible text-height
+      -- rebuild, then apply the current frame's perspective after layout.
+      SetTextPerspective(item, 0)
+      local nativeX, nativeY = NativeAnimationPlacement(record, item, anchor, height)
+      if nativeX and nativeY then
+        item.text:SetPoint(anchor, UIParent, "BOTTOMLEFT", nativeX, nativeY)
+        item.text:SetTextHeight(math.max(1, item.visualSize or item.fontSize or 12))
+      else
+        item.visualSize = item.fontSize
+        item.perspectiveWarp = 0
+        item.text:SetPoint(anchor, frame, anchor, 0, item.position)
+        item.text:SetTextHeight(math.max(1, item.fontSize or 12))
+      end
+      SetTextPerspective(item, item.perspectiveWarp or 0)
       item.text:SetJustifyH(justify)
       item.text:SetAlpha(alpha)
+      if item.native3D then
+        ConfigureSourceIcon(item)
+        ConfigureResultIcon(item)
+      end
       if item.icon:IsShown() then SetSourceIconAlpha(item, alpha * iconAlpha) end
       if item.result.icon:IsShown() then SetSourceIconAlpha(item.result, alpha) end
     end
