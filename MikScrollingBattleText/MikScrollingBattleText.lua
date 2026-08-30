@@ -543,8 +543,10 @@ function MikSBT.CombatEventsHandler(combatEvent)
    eventTypeString = eventTypeString .. "DODGE";
   elseif (combatEvent.ActionType == MikCEH.ACTIONTYPE_PARRY) then
    eventTypeString = eventTypeString .. "PARRY";
+   animationEvent.IsParried = true;
   elseif (combatEvent.ActionType == MikCEH.ACTIONTYPE_BLOCK) then
    eventTypeString = eventTypeString .. "BLOCK";
+   animationEvent.IsBlocked = true;
   elseif (combatEvent.ActionType == MikCEH.ACTIONTYPE_RESIST) then
    eventTypeString = eventTypeString .. "RESIST";
   elseif (combatEvent.ActionType == MikCEH.ACTIONTYPE_ABSORB) then
@@ -657,9 +659,7 @@ function MikSBT.CombatEventsHandler(combatEvent)
    animationEvent.PartialEffectText = "\124cffFAFA00\124h"..string.gsub(ABSORB_TRAILER, "%%d", combatEvent.PartialAmount).."\124h\124r";
   end
  elseif (combatEvent.PartialActionType == MikCEH.PARTIALACTIONTYPE_BLOCK) then
-  if (BLOCK_TRAILER) then
-   animationEvent.PartialEffectText = "\124cff7F00FF\124h"..string.gsub(BLOCK_TRAILER, "%%d", combatEvent.PartialAmount).."\124h\124r";
-  end
+  animationEvent.IsBlocked = true;
  elseif (combatEvent.PartialActionType == MikCEH.PARTIALACTIONTYPE_RESIST) then
   if (RESIST_TRAILER) then
    animationEvent.PartialEffectText = " \124cff81007F\124h"..string.gsub(RESIST_TRAILER, "%%d", combatEvent.PartialAmount).."\124h\124r";
@@ -673,9 +673,9 @@ function MikSBT.CombatEventsHandler(combatEvent)
    animationEvent.PartialEffectText = "\124cff7D0000\124h"..CRUSHING_TRAILER.."\124h\124r";
   end
  elseif (combatEvent.PartialActionType == MikCEH.PARTIALACTIONTYPE_GLANCING) then
-  if (GLANCING_TRAILER) then
-   animationEvent.PartialEffectText = "\124cffFA0000\124h"..GLANCING_TRAILER.."\124h\124r";
-  end
+  -- zDNumbers renders glancing blows visually instead of appending the noisy
+  -- localized "(Glancing)" partial-effect trailer.
+  animationEvent.IsGlancing = true;
  elseif (combatEvent.PartialActionType == MikCEH.PARTIALACTIONTYPE_OVERHEAL) then
   animationEvent.OverhealAmount = combatEvent.PartialAmount;
  end
@@ -794,6 +794,15 @@ function MikSBT.MergeEvents(mergeData, numEvents)
        mergeData.UnmergedEvents[x].TargetGUID == animationEvent.TargetGUID);
     if ((mergeData.UnmergedEvents[x].EventType == animationEvent.EventType) and
         (mergeData.UnmergedEvents[x].EffectName == animationEvent.EffectName) and sameNameplateTarget) then
+     -- Keep result-marked and ordinary hits separate so their right-side
+     -- glancing, parry, and block icons survive MSBT's short merge window.
+     if (mergeData.UnmergedEvents[x].IsGlancing ~= animationEvent.IsGlancing or
+         mergeData.UnmergedEvents[x].IsBlocked ~= animationEvent.IsBlocked or
+         mergeData.UnmergedEvents[x].IsParried ~= animationEvent.IsParried) then
+      sameNameplateTarget = false;
+     end
+
+    if (sameNameplateTarget) then
  
      -- Check if there is no effect name
      if (mergeData.UnmergedEvents[x].EffectName == nil) then
@@ -816,6 +825,7 @@ function MikSBT.MergeEvents(mergeData, numEvents)
       eventMerged = true;
       unmergedEventMatched = true;
      end -- Effect name?
+    end -- Same glancing state.
     end -- Event types match and effect names the same.
  
  

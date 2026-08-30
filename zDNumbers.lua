@@ -48,6 +48,12 @@ Z.Reset = ResetConfig
 
 local TEXT_SLOTS = 10
 local SOURCE_ICON_SCALE = .70
+local RESULT_ICON_SCALE = .70
+local ICON_TEXT_GAP = 3
+local GLANCING_RESULT_ICON = "Interface\\Icons\\Ability_Whirlwind"
+local PARRIED_RESULT_ICON = "Interface\\Icons\\Ability_Parry"
+local BLOCKED_RESULT_ICON = "Interface\\Icons\\Ability_Defend"
+
 local recordsByPlate = {}
 local recordsByUnit = {}
 local recordsByGuid = {}
@@ -334,12 +340,32 @@ local function ConfigureSourceIcon(item)
 
   local size = math.max(1, math.floor((item.fontSize or 12) * SOURCE_ICON_SCALE + .5))
   item.icon:ClearAllPoints()
-  item.icon:SetPoint("RIGHT", item.text, "LEFT", 2, 0)
+  item.icon:SetPoint("RIGHT", item.text, "LEFT", -ICON_TEXT_GAP, 0)
   item.icon:SetTexture(item.iconTexture)
   ConfigureRoundedSourceIcon(item, size)
   local alpha = item.text.GetAlpha and item.text:GetAlpha() or 1
   SetSourceIconAlpha(item, alpha * SourceIconAlpha())
   SetSourceIconShown(item, true)
+end
+
+local function ConfigureResultIcon(item)
+  local result = item and item.result
+  if not result then return end
+  result.active = item.active
+  result.fontSize = item.fontSize
+  result.iconTexture = item.resultIconTexture
+  if not item.active or not result.iconTexture then
+    SetSourceIconShown(result, false)
+    return
+  end
+
+  local size = math.max(1, math.floor((item.fontSize or 12) * RESULT_ICON_SCALE + .5))
+  result.icon:ClearAllPoints()
+  result.icon:SetPoint("LEFT", item.text, "RIGHT", ICON_TEXT_GAP, 0)
+  result.icon:SetTexture(result.iconTexture)
+  ConfigureRoundedSourceIcon(result, size)
+  SetSourceIconAlpha(result, item.text.GetAlpha and item.text:GetAlpha() or 1)
+  SetSourceIconShown(result, true)
 end
 
 local function ClearAnimations(record)
@@ -349,6 +375,7 @@ local function ClearAnimations(record)
     item.active = nil
     item.text:Hide()
     SetSourceIconShown(item, false)
+    SetSourceIconShown(item.result, false)
   end
   record.frame:Hide()
 end
@@ -455,13 +482,16 @@ local function CreateRecord(base)
   local frame = CreateFrame("Frame", nil, base)
   frame.items = {}
   for i = 1, TEXT_SLOTS do
+    local resultIcon = frame:CreateTexture(nil, "BORDER")
     local item = {
       text = frame:CreateFontString(nil, "ARTWORK", "GameFontNormal"),
       icon = frame:CreateTexture(nil, "BORDER"),
+      result = { icon = resultIcon, frame = frame },
       frame = frame,
     }
     item.text:Hide()
     item.icon:Hide()
+    resultIcon:Hide()
     frame.items[i] = item
   end
   frame:Hide()
@@ -720,6 +750,9 @@ local function AddAnimation(record, animationEvent)
   local size = MikSBT.GetFontSize(animationEvent.ScrollArea, settings, animationEvent.IsCrit)
   local font = MikSBT.GetFontPath(animationEvent.ScrollArea, settings, animationEvent.IsCrit)
   local outline = MikSBT.GetFontOutline(animationEvent.ScrollArea, settings, animationEvent.IsCrit)
+  local colorR = settings.FontSettings.Color.r
+  local colorG = settings.FontSettings.Color.g
+  local colorB = settings.FontSettings.Color.b
   local anchor, justify = Alignment()
   local spacing = size + 8
 
@@ -736,17 +769,80 @@ local function AddAnimation(record, animationEvent)
   slot.position = 0
   slot.fontSize = size
   slot.iconTexture = ResolveSourceIcon(animationEvent)
+  slot.resultIconTexture = animationEvent.IsBlocked and BLOCKED_RESULT_ICON
+    or animationEvent.IsParried and PARRIED_RESULT_ICON
+    or animationEvent.IsGlancing and GLANCING_RESULT_ICON or nil
   slot.text:ClearAllPoints()
   slot.text:SetPoint(anchor, frame, anchor, 0, 0)
   slot.text:SetJustifyH(justify)
   slot.text:SetFont(font, math.max(1, size - 1), outline)
   slot.text:SetTextHeight(math.max(1, size))
-  slot.text:SetTextColor(settings.FontSettings.Color.r, settings.FontSettings.Color.g, settings.FontSettings.Color.b)
-  slot.text:SetText(animationEvent.Text)
+  slot.text:SetTextColor(colorR, colorG, colorB)
+  -- Full blocks and parries have no damage amount, so their result icon
+  -- replaces the localized message. Partial blocks retain the damage number.
+  local iconOnlyResult = (animationEvent.IsBlocked or animationEvent.IsParried)
+    and (not animationEvent.Amount or tonumber(animationEvent.Amount) == 0)
+  slot.text:SetText(iconOnlyResult and "" or animationEvent.Text)
   slot.text:SetAlpha(1)
   slot.text:Show()
   ConfigureSourceIcon(slot)
+  ConfigureResultIcon(slot)
   frame:Show()
+end
+
+local function RetireAnimationItem(item)
+  item.active = nil
+  item.text:Hide()
+  SetSourceIconShown(item, false)
+  SetSourceIconShown(item.result, false)
+end
+
+local function ResolveAnimationSpacing(frame, height)
+  local layout = frame.collisionLayout
+  if not layout then
+    layout = {}
+    frame.collisionLayout = layout
+  end
+  local oldCount = frame.collisionLayoutCount or 0
+  local count = 0
+  for i = 1, TEXT_SLOTS do
+    local item = frame.items[i]
+    if item.active then
+      count = count + 1
+      layout[count] = item
+    end
+  end
+  for i = count + 1, oldCount do layout[i] = nil end
+  frame.collisionLayoutCount = count
+
+  -- Avoid table.getn/table.insert/table.sort here. Vanilla-compatible clients
+  -- can preserve a stale implicit array size on reused tables, producing nil
+  -- holes. Ten slots are cheaper and safer to sort explicitly.
+  for i = 2, count do
+    local item = layout[i]
+    local index = i - 1
+    while index >= 1 and layout[index].position > item.position do
+      layout[index + 1] = layout[index]
+      index = index - 1
+    end
+    layout[index + 1] = item
+  end
+
+  local previous
+  for i = 1, count do
+    local item = layout[i]
+    if previous then
+      local minimumGap = ((previous.fontSize or 12) + (item.fontSize or 12)) * .5 + 4
+      item.position = math.max(item.position, previous.position + minimumGap)
+    end
+    if item.position >= height then
+      -- A crowded area cannot display unlimited events without overlap. End
+      -- the oldest/topmost entries early instead of drawing them together.
+      RetireAnimationItem(item)
+    else
+      previous = item
+    end
+  end
 end
 
 local function UpdateAnimations(record, now)
@@ -766,31 +862,38 @@ local function UpdateAnimations(record, now)
   local fadeTime = travelTime - fadeDelay
   local anchor, justify = Alignment()
   local iconAlpha = SourceIconAlpha()
-  local anyActive
-
+  -- Move first, resolve collisions second, and render last. Keeping those
+  -- phases separate prevents mixed crit/normal sizes from crossing visually.
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
     if item.active then
       item.position = item.position + speed * (now - item.lastUpdate)
       item.lastUpdate = now
-      local elapsed = now - item.startTime
       if item.position >= height then
-        item.active = nil
-        item.text:Hide()
-        SetSourceIconShown(item, false)
-      else
-        anyActive = true
-        local alpha = 1
-        if elapsed > fadeDelay and fadeTime > 0 then
-          alpha = 1 - ((elapsed - fadeDelay) / fadeTime)
-          if alpha < 0 then alpha = 0 end
-        end
-        item.text:ClearAllPoints()
-        item.text:SetPoint(anchor, frame, anchor, 0, item.position)
-        item.text:SetJustifyH(justify)
-        item.text:SetAlpha(alpha)
-        if item.icon:IsShown() then SetSourceIconAlpha(item, alpha * iconAlpha) end
+        RetireAnimationItem(item)
       end
+    end
+  end
+
+  ResolveAnimationSpacing(frame, height)
+
+  local anyActive
+  for i = 1, TEXT_SLOTS do
+    local item = frame.items[i]
+    if item.active then
+      anyActive = true
+      local elapsed = now - item.startTime
+      local alpha = 1
+      if elapsed > fadeDelay and fadeTime > 0 then
+        alpha = 1 - ((elapsed - fadeDelay) / fadeTime)
+        if alpha < 0 then alpha = 0 end
+      end
+      item.text:ClearAllPoints()
+      item.text:SetPoint(anchor, frame, anchor, 0, item.position)
+      item.text:SetJustifyH(justify)
+      item.text:SetAlpha(alpha)
+      if item.icon:IsShown() then SetSourceIconAlpha(item, alpha * iconAlpha) end
+      if item.result.icon:IsShown() then SetSourceIconAlpha(item.result, alpha) end
     end
   end
   if not anyActive then
@@ -822,10 +925,16 @@ function Z.Refresh()
   for record in pairs(visibleRecords) do
     ConfigureRecord(record)
     if not Enabled() then ClearAnimations(record) end
-    for i = 1, TEXT_SLOTS do ConfigureSourceIcon(record.frame.items[i]) end
+    for i = 1, TEXT_SLOTS do
+      ConfigureSourceIcon(record.frame.items[i])
+      ConfigureResultIcon(record.frame.items[i])
+    end
   end
   for record in pairs(fadingRecords) do
-    for i = 1, TEXT_SLOTS do ConfigureSourceIcon(record.frame.items[i]) end
+    for i = 1, TEXT_SLOTS do
+      ConfigureSourceIcon(record.frame.items[i])
+      ConfigureResultIcon(record.frame.items[i])
+    end
   end
   if Z.options and Z.options.Refresh then Z.options:Refresh() end
 end
