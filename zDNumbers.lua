@@ -64,6 +64,7 @@ local recordsByPlate = {}
 local recordsByUnit = {}
 local recordsByGuid = {}
 local visibleRecords = {}
+local animatingRecords = {}
 local fadingRecords = {}
 local fadingRecordsByGuid = {}
 local recycledRecords = {}
@@ -73,6 +74,8 @@ local guidEventsEnabled
 local cachedWorldChildren = {}
 local cachedWorldChildCount = -1
 local nextPlateScan = 0
+local nextLegacyPlateScan = 0
+local lastOutgoingPlateScan
 local sourceSpellIcons = {}
 local sourceSpellbookScanned
 local sourceSpellLibrary
@@ -84,12 +87,16 @@ local validFrameStrata = {
 
 local function SetTextPerspective(item, amount)
   if not item or not item.text or type(zAPI) ~= "function" then return end
-  pcall(zAPI, "fontTrapezoid", item.text, tonumber(amount) or 0)
+  amount = tonumber(amount) or 0
+  if item.appliedPerspective == amount and item.perspectiveAPI == zAPI then return end
+  local ok, applied = pcall(zAPI, "fontTrapezoid", item.text, amount)
+  if ok and applied and applied ~= 0 then
+    item.appliedPerspective, item.perspectiveAPI = amount, zAPI
+  end
 end
 
 local function SafeFrameStrata(frame)
-  local strata = frame and frame.GetFrameStrata and frame:GetFrameStrata()
-  return validFrameStrata[strata] and strata or "LOW"
+  return "TOOLTIP"
 end
 
 local function IsStatusBar(object)
@@ -193,10 +200,21 @@ local function NativeProject(record, verticalOffset)
   if type(zAPI) ~= "function" or not record then return end
   local identifier = record.guid or record.unit
   if not identifier then return end
-  local ok, x, y, depth, worldX, worldY, worldZ =
-    pcall(zAPI, "projectUnit", identifier, verticalOffset or 0)
+  verticalOffset = verticalOffset or 0
+  local now = GetTime()
+  local sample = record.nativeProjectionSample
+  if not sample then sample = {}; record.nativeProjectionSample = sample end
+  if verticalOffset == 0 and sample.time == now and sample.api == zAPI and sample.identifier == identifier then
+    return sample.x, sample.y, sample.depth, sample.wx, sample.wy, sample.wz
+  end
+  local ok, x, y, depth, worldX, worldY, worldZ = pcall(zAPI, "projectUnit", identifier, verticalOffset)
+  if verticalOffset == 0 then
+    sample.time, sample.api, sample.identifier = now, zAPI, identifier
+    sample.x, sample.y, sample.depth, sample.wx, sample.wy, sample.wz = nil, nil, nil, nil, nil, nil
+  end
   if not ok or type(x) ~= "number" or type(y) ~= "number"
       or type(depth) ~= "number" or depth <= 0 then return end
+  if verticalOffset == 0 then sample.x, sample.y, sample.depth, sample.wx, sample.wy, sample.wz = x, y, depth, worldX, worldY, worldZ end
   return x, y, depth, worldX, worldY, worldZ
 end
 
@@ -304,6 +322,8 @@ local function ResolveSourceIcon(animationEvent)
 end
 
 local function SetSourceIconShown(item, shown)
+  if item.sourceIconShown == shown and item.sourceIconRounded == item.roundedIcon then return end
+  item.sourceIconShown, item.sourceIconRounded = shown, item.roundedIcon
   if shown then item.icon:Show() else item.icon:Hide() end
   if not item.iconPieces then return end
   for i = 1, table.getn(item.iconPieces) do
@@ -313,6 +333,8 @@ local function SetSourceIconShown(item, shown)
 end
 
 local function SetSourceIconAlpha(item, alpha)
+  if item.sourceIconAlpha == alpha then return end
+  item.sourceIconAlpha = alpha
   item.icon:SetAlpha(alpha)
   if not item.iconPieces then return end
   for i = 1, table.getn(item.iconPieces) do item.iconPieces[i]:SetAlpha(alpha) end
@@ -331,7 +353,7 @@ local function ConfigureRoundedSourceIcon(item, size)
   -- genuinely transparent, rounded corners while preserving the source art.
   if not item.iconPieces then
     item.iconPieces = {}
-    for i = 1, 4 do item.iconPieces[i] = item.frame:CreateTexture(nil, "BORDER") end
+    for i = 1, 4 do item.iconPieces[i] = item.frame:CreateTexture(nil, "ARTWORK") end
   end
 
   local corner = math.min(math.floor((size - 1) / 2),
@@ -382,10 +404,14 @@ local function ConfigureSourceIcon(item)
 
   local size = math.max(1, math.floor((item.visualSize or item.fontSize or 12)
     * SOURCE_ICON_SCALE + .5))
-  item.icon:ClearAllPoints()
-  item.icon:SetPoint("RIGHT", item.text, "LEFT", -ICON_TEXT_GAP, 0)
-  item.icon:SetTexture(item.iconTexture)
-  ConfigureRoundedSourceIcon(item, size)
+  if item.configuredIconSize ~= size or item.configuredIconTexture ~= item.iconTexture then
+    item.icon:ClearAllPoints()
+    item.icon:SetPoint("RIGHT", item.text, "LEFT", -ICON_TEXT_GAP, 0)
+    item.icon:SetTexture(item.iconTexture)
+    ConfigureRoundedSourceIcon(item, size)
+    item.sourceIconAlpha = nil
+    item.configuredIconSize, item.configuredIconTexture = size, item.iconTexture
+  end
   local alpha = item.text.GetAlpha and item.text:GetAlpha() or 1
   SetSourceIconAlpha(item, alpha * SourceIconAlpha())
   SetSourceIconShown(item, true)
@@ -404,22 +430,31 @@ local function ConfigureResultIcon(item)
 
   local size = math.max(1, math.floor((item.visualSize or item.fontSize or 12)
     * RESULT_ICON_SCALE + .5))
-  result.icon:ClearAllPoints()
-  result.icon:SetPoint("LEFT", item.text, "RIGHT", ICON_TEXT_GAP, 0)
-  result.icon:SetTexture(result.iconTexture)
-  ConfigureRoundedSourceIcon(result, size)
+  if result.configuredIconSize ~= size or result.configuredIconTexture ~= result.iconTexture then
+    result.icon:ClearAllPoints()
+    result.icon:SetPoint("LEFT", item.text, "RIGHT", ICON_TEXT_GAP, 0)
+    result.icon:SetTexture(result.iconTexture)
+    ConfigureRoundedSourceIcon(result, size)
+    result.sourceIconAlpha = nil
+    result.configuredIconSize, result.configuredIconTexture = size, result.iconTexture
+  end
   SetSourceIconAlpha(result, item.text.GetAlpha and item.text:GetAlpha() or 1)
   SetSourceIconShown(result, true)
 end
 
 local function ClearAnimations(record)
   if not record or not record.frame then return end
+  animatingRecords[record] = nil
+  record.frame.spacingLastTime = nil
   for i = 1, TEXT_SLOTS do
     local item = record.frame.items[i]
-    item.active = nil
-    item.text:Hide()
-    SetSourceIconShown(item, false)
-    SetSourceIconShown(item.result, false)
+    if item then
+      item.active = nil
+      SetTextPerspective(item, 0)
+      item.text:Hide()
+      SetSourceIconShown(item, false)
+      SetSourceIconShown(item.result, false)
+    end
   end
   record.frame:Hide()
 end
@@ -457,7 +492,7 @@ local function FreezeRecord(record)
 
   local hasAnimations
   for i = 1, TEXT_SLOTS do
-    if record.frame.items[i].active then hasAnimations = true; break end
+    if record.frame.items[i] and record.frame.items[i].active then hasAnimations = true; break end
   end
   if not hasAnimations then ClearAnimations(record); return end
 
@@ -474,7 +509,8 @@ local function FreezeRecord(record)
   local frame = record.frame
   frame:SetParent(UIParent)
   frame:SetScale(record.screenScale or 1)
-  frame:SetFrameStrata(record.screenStrata or "LOW")
+  frame:SetFrameStrata("TOOLTIP")
+  frame:SetFrameLevel(100)
   frame:ClearAllPoints()
   frame:SetPoint("CENTER", UIParent, "BOTTOMLEFT", record.screenX, record.screenY)
   frame:Show()
@@ -491,6 +527,9 @@ local function ConfigureRecord(record)
   local y = tonumber(Z.config.y) or 8
   if width < 20 then width = 20 end
   if height < 10 then height = 10 end
+  if record.anchor == anchor and record.configParent == parent and record.configWidth == width
+      and record.configHeight == height and record.configX == x and record.configY == y
+      and (not record.frame.GetParent or record.frame:GetParent() == parent) then return end
 
   -- GudaPlates and similar replacements hide every unrecognized direct child
   -- of the Blizzard plate. Live under their visible overlay instead.
@@ -499,24 +538,37 @@ local function ConfigureRecord(record)
   end
   if record.frame.SetAlpha then record.frame:SetAlpha(1) end
   if record.frame.SetFrameStrata then
-    record.frame:SetFrameStrata(SafeFrameStrata(parent or anchor))
+    record.frame:SetFrameStrata("TOOLTIP")
   end
   record.anchor = anchor
   record.frame:ClearAllPoints()
   record.frame:SetPoint("BOTTOM", anchor, "TOP", x, y)
   record.frame:SetSize(width, height)
-  local anchorLevel = anchor.GetFrameLevel and anchor:GetFrameLevel() or 1
-  record.frame:SetFrameLevel(math.max(0, anchorLevel - 1))
+  record.frame:SetFrameLevel(100)
   record.frame.configHeight = height
+  record.configParent, record.configWidth, record.configHeight, record.configX, record.configY = parent, width, height, x, y
+end
+
+local function CreateAnimationItem(frame)
+  local resultIcon = frame:CreateTexture(nil, "ARTWORK")
+  local item = {
+    text = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal"),
+    icon = frame:CreateTexture(nil, "ARTWORK"),
+    result = { icon = resultIcon, frame = frame }, frame = frame,
+  }
+  item.text:Hide(); item.icon:Hide(); resultIcon:Hide()
+  return item
 end
 
 local function CreateRecord(base)
   local recycled = table.remove(recycledRecords)
   if recycled then
     recycled.base = base
+    recycled.anchor = nil
     recycled.frame:SetParent(base)
     recycled.frame:SetScale(1)
-    recycled.frame:SetFrameStrata(SafeFrameStrata(base))
+    recycled.frame:SetFrameStrata("TOOLTIP")
+    recycled.frame:SetFrameLevel(100)
     recordsByPlate[base] = recycled
     ConfigureRecord(recycled)
     return recycled
@@ -524,20 +576,10 @@ local function CreateRecord(base)
 
   local record = { base = base }
   local frame = CreateFrame("Frame", nil, base)
+  frame:SetFrameStrata("TOOLTIP")
+  frame:SetFrameLevel(100)
   frame.items = {}
-  for i = 1, TEXT_SLOTS do
-    local resultIcon = frame:CreateTexture(nil, "BORDER")
-    local item = {
-      text = frame:CreateFontString(nil, "ARTWORK", "GameFontNormal"),
-      icon = frame:CreateTexture(nil, "BORDER"),
-      result = { icon = resultIcon, frame = frame },
-      frame = frame,
-    }
-    item.text:Hide()
-    item.icon:Hide()
-    resultIcon:Hide()
-    frame.items[i] = item
-  end
+  -- Allocate slots only when numbers actually use them, not on crowd arrival.
   frame:Hide()
   record.frame = frame
   recordsByPlate[base] = record
@@ -570,7 +612,7 @@ local function AttachNameplate(base, unit)
   if not unit and not guid and not name then return end
 
   local changed = record and ((record.guid and guid and record.guid ~= guid)
-    or (record.unit and unit and record.unit ~= unit)
+    or (not (record.guid and guid) and record.unit and unit and record.unit ~= unit)
     or (not record.guid and not guid and record.name and name and record.name ~= name))
   if changed then
     visibleRecords[record] = nil
@@ -629,8 +671,9 @@ local function IsWorldNameplate(frame)
   return false
 end
 
-local function ScanVisibleNameplates()
+local function ScanVisibleNameplates(forceLegacy)
   if not Z.config then return end
+  local modernScan, scanned = false, {}
 
   for record in pairs(visibleRecords) do
     if record.base and record.base.IsShown and not record.base:IsShown() then
@@ -641,8 +684,9 @@ local function ScanVisibleNameplates()
   if C_NamePlate and C_NamePlate.GetNamePlates then
     local ok, plates = pcall(C_NamePlate.GetNamePlates)
     if ok and type(plates) == "table" then
+      modernScan = true
       for _, plate in pairs(plates) do
-        if plate and (not plate.IsShown or plate:IsShown()) then AttachNameplate(plate) end
+        if plate and (not plate.IsShown or plate:IsShown()) then AttachNameplate(plate); scanned[plate] = true end
       end
     end
   end
@@ -652,7 +696,7 @@ local function ScanVisibleNameplates()
       local unit = "nameplate" .. i
       if UnitExists(unit) then
         local ok, plate = pcall(C_NamePlate.GetNamePlateForUnit, unit)
-        if ok and plate then AttachNameplate(plate, unit) end
+        if ok and plate and (not scanned[plate] or not recordsByPlate[plate] or recordsByPlate[plate].unit ~= unit) then AttachNameplate(plate, unit); scanned[plate] = true end
       end
     end
 
@@ -673,7 +717,8 @@ local function ScanVisibleNameplates()
 
   -- Vanilla Blizzard plates, GudaPlates, and other legacy addons may never
   -- publish NAME_PLATE_UNIT_ADDED. Their real frames still live on WorldFrame.
-  if WorldFrame and WorldFrame.GetChildren then
+  if (not modernScan or forceLegacy or GetTime() >= nextLegacyPlateScan) and WorldFrame and WorldFrame.GetChildren then
+    nextLegacyPlateScan = GetTime()+1
     local childCount = WorldFrame.GetNumChildren and WorldFrame:GetNumChildren()
     if not childCount or childCount ~= cachedWorldChildCount then
       cachedWorldChildren = { WorldFrame:GetChildren() }
@@ -681,7 +726,7 @@ local function ScanVisibleNameplates()
     end
     for i = 1, table.getn(cachedWorldChildren) do
       local plate = cachedWorldChildren[i]
-      if plate and (not plate.IsShown or plate:IsShown()) and IsWorldNameplate(plate) then
+      if plate and not scanned[plate] and (not plate.IsShown or plate:IsShown()) and IsWorldNameplate(plate) then
         AttachNameplate(plate)
       end
     end
@@ -777,9 +822,11 @@ local function AddAnimation(record, animationEvent)
   if not record.frozen then ConfigureRecord(record) end
   local frame = record.frame
   local now = GetTime()
+  if not frame:IsShown() then frame.spacingLastTime = now end
   local slot, oldest
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
+    if not item then item = CreateAnimationItem(frame); frame.items[i] = item end
     if not item.active then
       slot = item
       break
@@ -798,19 +845,13 @@ local function AddAnimation(record, animationEvent)
   local colorG = settings.FontSettings.Color.g
   local colorB = settings.FontSettings.Color.b
   local anchor, justify = Alignment()
-  local spacing = size + 8
-
-  for i = 1, TEXT_SLOTS do
-    local item = frame.items[i]
-    if item.active and item ~= slot and item.position < spacing then
-      item.position = math.min(frame.configHeight, item.position + spacing)
-    end
-  end
-
   slot.active = true
   slot.startTime = now
   slot.lastUpdate = now
   slot.position = 0
+  slot.stackOffset, slot.displayPosition, slot.stackTarget = 0, 0, 0
+  frame.spawnSequence = (frame.spawnSequence or 0) + 1
+  slot.spawnSequence = frame.spawnSequence
   slot.fontSize = size
   slot.visualSize = size
   slot.native3D = nil
@@ -819,6 +860,7 @@ local function AddAnimation(record, animationEvent)
   slot.nativeCorrectionX, slot.nativeCorrectionY = nil, nil
   slot.perspectiveWarp = 0
   SetTextPerspective(slot, 0)
+  slot.appliedPerspective, slot.perspectiveAPI = nil, nil
 
   local baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ =
     NativeProject(record, 0)
@@ -845,26 +887,33 @@ local function AddAnimation(record, animationEvent)
     or animationEvent.IsGlancing and GLANCING_RESULT_ICON or nil
   slot.text:ClearAllPoints()
   slot.text:SetPoint(anchor, frame, anchor, 0, 0)
+  slot.renderReference, slot.renderAnchor = frame, anchor
   slot.text:SetJustifyH(justify)
+  slot.appliedJustify = justify
   local fontSurfaceSize = slot.native3D
     and math.floor(size * NATIVE_MAX_SCALE + .5) or size - 1
   slot.text:SetFont(font, math.max(1, fontSurfaceSize), outline)
   slot.text:SetTextHeight(math.max(1, size))
+  slot.appliedTextHeight = math.max(1, size)
   slot.text:SetTextColor(colorR, colorG, colorB)
   -- Full blocks and parries have no damage amount, so their result icon
   -- replaces the localized message. Partial blocks retain the damage number.
   local iconOnlyResult = (animationEvent.IsBlocked or animationEvent.IsParried)
     and (not animationEvent.Amount or tonumber(animationEvent.Amount) == 0)
   slot.text:SetText(iconOnlyResult and "" or animationEvent.Text)
+  slot.collisionTextHeight = nil
   slot.text:SetAlpha(1)
+  slot.appliedAlpha = 1
   slot.text:Show()
   ConfigureSourceIcon(slot)
   ConfigureResultIcon(slot)
   frame:Show()
+  animatingRecords[record] = true
 end
 
 local function RetireAnimationItem(item)
   item.active = nil
+  item.stackOffset, item.displayPosition, item.stackTarget = nil, nil, nil
   item.native3D = nil
   item.visualSize = nil
   item.perspectiveWarp = nil
@@ -877,13 +926,18 @@ end
 local function NativeAnimationPlacement(record, item, anchor, height)
   if not item.native3D or not UIParent or not UIParent.GetWidth
       or not UIParent.GetHeight then return end
-  local progress = math.max(0, math.min(1, item.position / height))
+  local progress = math.max(0, math.min(1, (item.displayPosition or item.position) / height))
   local worldOffset = progress * (item.nativeTravel or NATIVE_DEFAULT_TRAVEL)
 
-  local baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ =
-    NativeProject(record, 0)
-  local pointX, pointY, pointDepth, pointWorldX, pointWorldY, pointWorldZ =
-    NativeProject(record, worldOffset)
+  local baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ
+  if not record.frozen then baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ = NativeProject(record, 0) end
+  local pointX, pointY, pointDepth, pointWorldX, pointWorldY, pointWorldZ
+  if baseX and baseWorldX and baseWorldY and baseWorldZ then
+    pointWorldX, pointWorldY, pointWorldZ = baseWorldX, baseWorldY, baseWorldZ + worldOffset
+    pointX, pointY, pointDepth = NativeWorldToScreen(pointWorldX, pointWorldY, pointWorldZ)
+  elseif baseX then
+    pointX, pointY, pointDepth, pointWorldX, pointWorldY, pointWorldZ = NativeProject(record, worldOffset)
+  end
 
   if baseX and pointX then
     item.nativeBaseX, item.nativeBaseY, item.nativeBaseZ =
@@ -926,7 +980,7 @@ local function NativeAnimationPlacement(record, item, anchor, height)
     pointY * uiHeight + item.nativeCorrectionY
 end
 
-local function ResolveAnimationSpacing(frame, height)
+local function ResolveAnimationSpacing(frame, height, elapsed)
   local layout = frame.collisionLayout
   if not layout then
     layout = {}
@@ -936,7 +990,7 @@ local function ResolveAnimationSpacing(frame, height)
   local count = 0
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
-    if item.active then
+    if item and item.active then
       count = count + 1
       layout[count] = item
     end
@@ -950,7 +1004,9 @@ local function ResolveAnimationSpacing(frame, height)
   for i = 2, count do
     local item = layout[i]
     local index = i - 1
-    while index >= 1 and layout[index].position > item.position do
+    while index >= 1 and (layout[index].position > item.position or
+        (layout[index].position == item.position and
+          (layout[index].spawnSequence or 0) < (item.spawnSequence or 0))) do
       layout[index + 1] = layout[index]
       index = index - 1
     end
@@ -958,14 +1014,34 @@ local function ResolveAnimationSpacing(frame, height)
   end
 
   local previous
+  -- Natural travel stays untouched. Ease only the extra collision displacement
+  -- so a newly arriving event never teleports every existing number upward.
+  local blend = 1 - math.exp(-math.max(0, math.min(.1, elapsed or 1/60)) / .075)
   for i = 1, count do
     local item = layout[i]
+    local target = item.position
     if previous then
-      local minimumGap = ((previous.fontSize or 12)
-        + (item.fontSize or 12)) * .5 + 4
-      item.position = math.max(item.position, previous.position + minimumGap)
+      -- Bottom-anchored text needs the lower entry's actual height, not an
+      -- average of both font sizes or the old extra eight-pixel spawn shove.
+      local textHeight = previous.collisionTextHeight
+      if (textHeight == nil or not previous.appliedTextHeight) and previous.text.GetStringHeight then
+        textHeight = previous.text:GetStringHeight()
+        if previous.appliedTextHeight then previous.collisionTextHeight = textHeight end
+      end
+      local footprint = math.max(1, textHeight or previous.fontSize or 12)
+      if previous.icon and previous.icon:IsShown() then footprint = math.max(footprint,previous.configuredIconSize or previous.icon:GetHeight()) end
+      if previous.result and previous.result.icon:IsShown() then footprint = math.max(footprint,previous.result.configuredIconSize or previous.result.icon:GetHeight()) end
+      local minimumGap = footprint + 2
+      target = math.max(target, previous.stackTarget + minimumGap)
     end
-    if item.position >= height then
+    item.stackTarget = target
+    local offset = item.stackOffset or 0
+    offset = offset + (math.max(0, target - item.position) - offset) * blend
+    -- A released gap settles gently too, without reversing the number's motion.
+    if item.displayPosition then offset = math.max(offset, item.displayPosition - item.position) end
+    item.stackOffset = offset
+    item.displayPosition = item.position + offset
+    if item.displayPosition >= height then
       -- A crowded area cannot display unlimited events without overlap. End
       -- the oldest/topmost entries early instead of drawing them together.
       RetireAnimationItem(item)
@@ -996,7 +1072,7 @@ local function UpdateAnimations(record, now)
   -- phases separate prevents mixed crit/normal sizes from crossing visually.
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
-    if item.active then
+    if item and item.active then
       item.position = item.position + speed * (now - item.lastUpdate)
       item.lastUpdate = now
       if item.position >= height then
@@ -1005,12 +1081,14 @@ local function UpdateAnimations(record, now)
     end
   end
 
-  ResolveAnimationSpacing(frame, height)
+  local spacingElapsed = now - (frame.spacingLastTime or now - 1/60)
+  frame.spacingLastTime = now
+  ResolveAnimationSpacing(frame, height, spacingElapsed)
 
   local anyActive
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
-    if item.active then
+    if item and item.active then
       anyActive = true
       local elapsed = now - item.startTime
       local alpha = 1
@@ -1018,23 +1096,31 @@ local function UpdateAnimations(record, now)
         alpha = 1 - ((elapsed - fadeDelay) / fadeTime)
         if alpha < 0 then alpha = 0 end
       end
-      item.text:ClearAllPoints()
       -- Restore the unwarped glyph vertices before a possible text-height
       -- rebuild, then apply the current frame's perspective after layout.
-      SetTextPerspective(item, 0)
       local nativeX, nativeY = NativeAnimationPlacement(record, item, anchor, height)
+      local textHeight = math.max(1, nativeX and (item.visualSize or item.fontSize or 12) or (item.fontSize or 12))
+      if not item.appliedTextHeight or math.abs(textHeight-item.appliedTextHeight) > .001 then
+        SetTextPerspective(item, 0)
+        item.text:SetTextHeight(textHeight)
+        item.appliedTextHeight = textHeight
+        item.collisionTextHeight = nil
+        item.appliedPerspective = nil
+      end
       if nativeX and nativeY then
+        if item.renderReference ~= UIParent or item.renderAnchor ~= anchor then item.text:ClearAllPoints() end
         item.text:SetPoint(anchor, UIParent, "BOTTOMLEFT", nativeX, nativeY)
-        item.text:SetTextHeight(math.max(1, item.visualSize or item.fontSize or 12))
+        item.renderReference, item.renderAnchor = UIParent, anchor
       else
         item.visualSize = item.fontSize
         item.perspectiveWarp = 0
-        item.text:SetPoint(anchor, frame, anchor, 0, item.position)
-        item.text:SetTextHeight(math.max(1, item.fontSize or 12))
+        if item.renderReference ~= frame or item.renderAnchor ~= anchor then item.text:ClearAllPoints() end
+        item.text:SetPoint(anchor, frame, anchor, 0, item.displayPosition or item.position)
+        item.renderReference, item.renderAnchor = frame, anchor
       end
       SetTextPerspective(item, item.perspectiveWarp or 0)
-      item.text:SetJustifyH(justify)
-      item.text:SetAlpha(alpha)
+      if item.appliedJustify ~= justify then item.text:SetJustifyH(justify); item.appliedJustify = justify end
+      if item.appliedAlpha ~= alpha then item.text:SetAlpha(alpha); item.appliedAlpha = alpha end
       if item.native3D then
         ConfigureSourceIcon(item)
         ConfigureResultIcon(item)
@@ -1044,6 +1130,7 @@ local function UpdateAnimations(record, now)
     end
   end
   if not anyActive then
+    animatingRecords[record] = nil
     frame:Hide()
     if record.frozen then ReleaseFadingRecord(record) end
   end
@@ -1054,7 +1141,12 @@ local function HandleOutgoing(animationEvent)
   if not MikSBT.PrepareExternalAnimationEvent(animationEvent) then return end
   local record = FindRecord(animationEvent.Name, targetGuid)
   if not record then
-    ScanVisibleNameplates()
+    local now = GetTime()
+    -- AoE merge batches share one recovery scan instead of walking the entire
+    -- scene once for each unmatched hit. Legacy plates still recover promptly.
+    if lastOutgoingPlateScan ~= now then
+      lastOutgoingPlateScan = now; nextPlateScan = now + .25; ScanVisibleNameplates(true)
+    end
     record = FindRecord(animationEvent.Name, targetGuid)
   end
   if record then AddAnimation(record, animationEvent) end
@@ -1064,6 +1156,67 @@ local function RegisterMSBTIntegration()
   if MikSBT and MikSBT.RegisterOutgoingNameplateHandler then
     MikSBT.RegisterOutgoingNameplateHandler(HandleOutgoing, Enabled, ConsumeGuidHint)
     Enabled()
+  end
+end
+
+-- Public preview hook used by zNameplates' optional dummy cluster. It feeds
+-- directly through the normal renderer so MSBT fonts, colours, crit sizing,
+-- icons, spacing, speed, and fade settings are all exercised by the test.
+local dummyPulse = 0
+function Z.PulseDummyDamage(bases)
+  if not Enabled() then return nil, "Enable nameplate damage in zDNumbers first." end
+  if type(bases) ~= "table" or table.getn(bases) == 0 then
+    return nil, "No dummy nameplates are available."
+  end
+
+  local profile = MikSBT.CurrentProfile
+  local display = profile.DisplaySettings and profile.DisplaySettings.Outgoing
+  local settings = profile.EventSettings and profile.EventSettings.MSBT_EVENTTYPE_OUTGOING_DAMAGE
+  if not display or not settings then return nil, "The active MSBT profile is not ready." end
+
+  dummyPulse = dummyPulse + 1
+  local textures = {
+    "Interface\\Icons\\Ability_MeleeDamage",
+    "Interface\\Icons\\Spell_Frost_FrostBolt02",
+    "Interface\\Icons\\Ability_BackStab",
+    "Interface\\Icons\\Ability_Hunter_CriticalShot",
+    "Interface\\Icons\\Spell_Shadow_ShadowBolt",
+  }
+  local scrollArea = { DisplaySettings = display }
+  for i = 1, table.getn(bases) do
+    local base = bases[i]
+    local record = base and AttachNameplate(base)
+    if record then
+      local amount = tostring(120 + i * 137 + math.mod(dummyPulse * 43, 211))
+      local animationEvent = {
+        ScrollArea = scrollArea,
+        EventType = "MSBT_EVENTTYPE_OUTGOING_DAMAGE",
+        EventSettings = settings,
+        UnformattedText = settings.Message,
+        Amount = amount,
+        Name = record.name or "Dummy",
+        IsCrit = i == 1,
+        Texture = textures[i] or textures[1],
+      }
+      if i == 3 then animationEvent.IsGlancing = true
+      elseif i == 4 then animationEvent.IsBlocked = true
+      elseif i == 5 then animationEvent.IsParried = true end
+      if MikSBT.PrepareExternalAnimationEvent(animationEvent) then
+        AddAnimation(record, animationEvent)
+      end
+    end
+  end
+  return true
+end
+
+function Z.HideDummyDamage(bases)
+  if type(bases) ~= "table" then return end
+  for i = 1, table.getn(bases) do
+    local record = recordsByPlate[bases[i]]
+    if record and visibleRecords[record] then
+      ClearAnimations(record)
+      DetachNameplate(record)
+    end
   end
 end
 
@@ -1120,6 +1273,7 @@ eventFrame:SetScript("OnEvent", function()
     Z.EnsureEmbeddedMSBT()
     RegisterMSBTIntegration()
     cachedWorldChildCount = -1
+    nextLegacyPlateScan = 0
     ScanVisibleNameplates()
     return
   elseif event == "NAME_PLATE_UNIT_ADDED" then
@@ -1156,9 +1310,8 @@ eventFrame:SetScript("OnUpdate", function()
     nextPlateScan = now + .25
     ScanVisibleNameplates()
   end
-  for record in pairs(visibleRecords) do
-    RememberRecordPosition(record)
+  for record in pairs(animatingRecords) do
+    if not record.frozen then RememberRecordPosition(record) end
     UpdateAnimations(record, now)
   end
-  for record in pairs(fadingRecords) do UpdateAnimations(record, now) end
 end)

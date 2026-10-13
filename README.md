@@ -30,3 +30,26 @@ across matching visible plates.
 
 MSBT remains the source of combat parsing, event formatting, fonts, colors,
 profiles, suppressions, merge behavior, text speed, and fade timing.
+
+New events no longer shove nearby numbers upward by a full font size plus
+eight pixels. Collision layout uses the lower number's rendered height (or
+result/source-icon footprint) with a two-pixel gap, and eases only the added
+displacement over roughly 75 ms. Normal travel speed remains unchanged. The
+same eased position drives both regular screen text and native depth motion;
+crowded entries retire after reaching the boundary, not when a pending push
+would put them there.
+
+## Performance
+
+Text/icon slots are allocated only when a number needs them and reused later;
+idle nameplates do not run animation tracking. Numbers on the same unit share
+one base projection per rendered frame, while each elevated point still gets
+its own live camera projection. Frozen/dead anchors use remembered world points
+without repeatedly resolving an expired unit.
+
+Rounded-icon geometry, font height, perspective setup, alignment and opacity
+are changed only when needed. Motion and fades still update every rendered
+frame. Modern nameplate enumeration avoids duplicate attachments; legacy/mixed
+hosts retain periodic recovery and immediate recovery on an unmatched damage
+batch. MSBT formatting, merging, ten-slot capacity, depth and profiles remain
+unchanged.

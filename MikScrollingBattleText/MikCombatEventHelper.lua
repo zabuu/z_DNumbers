@@ -3600,73 +3600,78 @@ end
 -- **********************************************************************************
 -- Gets a unit id for the name.
 -- **********************************************************************************
-function MikCEH.GetUnitIDFromName(uName)
- local unitID, unitName;
- 
-
- if LoggingCombat and LoggingCombat("RAW") == 1 then
-     local _, exist, unitID = pcall(UnitExists, uName)
-     if _ and exist then 
-        unitName = UnitName(unitID)
-        return unitID, unitName
-     end
- end
-
- -- Check if the name is the player.
- if (uName == playerName) then
-  unitID = "player";
-
- -- Check if the name is the pet.
- elseif (uName == UnitName("pet")) then
- unitID = "pet";
- 
- -- Check if the name is one of the player's raid or party members.
- else
-  -- Loop through all of the raid members.
-  local numRaidMembers = GetNumRaidMembers();
-  for i = 1, numRaidMembers do
-   if (uName == UnitName("raid" .. i)) then
-    unitID = "raid" .. i;
-   end
-  end
-  
-  for i = 1, numRaidMembers do
-   if (uName == UnitName("raidpet" .. i)) then
-    unitID = "raidpet" .. i;
-   end
-  end
-
-  -- Check if the unit ID was not already found.
-  if (not unitID) then
-   -- Loop through all of the party members.
-   local numPartyMembers = GetNumPartyMembers();
-   for i = 1, numPartyMembers do
-    if (uName == UnitName("party" .. i)) then
-     unitID = "party" .. i;
-    end
-   end
-  end
-  
-  if (not unitID) then
-   -- Loop through all of the party members.
-   local numPartyMembers = GetNumPartyMembers();
-   for i = 1, numPartyMembers do
-    if (uName == UnitName("partypet" .. i)) then
-     unitID = "partypet" .. i;
-    end
-   end
-  end
-
- end
- if unitID then
-  unitName = UnitName(unitID)
-  -- Return the unit id.
-   return unitID, unitName
- else
-    return nil, nil
- end
+local raidTokens = {}
+local raidPetTokens = {}
+for i = 1, 40 do
+    raidTokens[i] = "raid" .. i
+    raidPetTokens[i] = "raidpet" .. i
 end
 
+local partyTokens = {}
+local partyPetTokens = {}
+for i = 1, 4 do
+    partyTokens[i] = "party" .. i
+    partyPetTokens[i] = "partypet" .. i
+end
+
+function MikCEH.GetUnitIDFromName(uName)
+    if not uName then return nil, nil end
+
+    if LoggingCombat and LoggingCombat("RAW") == 1 then
+        local ok, exist, unitID = pcall(UnitExists, uName)
+        if ok and exist then 
+            return unitID, UnitName(unitID)
+        end
+    end
+
+    -- Check if the name is the player.
+    if (uName == playerName) then
+        return "player", playerName
+    end
+
+    -- Check if the name is the pet.
+    if (uName == UnitName("pet")) then
+        return "pet", uName
+    end
+
+    -- Check if the name is one of the player's raid members.
+    local numRaidMembers = GetNumRaidMembers()
+    if numRaidMembers > 0 then
+        for i = 1, numRaidMembers do
+            local token = raidTokens[i]
+            if (uName == UnitName(token)) then
+                return token, uName
+            end
+        end
+
+        for i = 1, numRaidMembers do
+            local token = raidPetTokens[i]
+            if (uName == UnitName(token)) then
+                return token, uName
+            end
+        end
+    else
+        -- Check if the name is one of the player's party members.
+        local numPartyMembers = GetNumPartyMembers()
+        if numPartyMembers > 0 then
+            for i = 1, numPartyMembers do
+                local token = partyTokens[i]
+                if (uName == UnitName(token)) then
+                    return token, uName
+                end
+            end
+
+            for i = 1, numPartyMembers do
+                local token = partyPetTokens[i]
+                if (uName == UnitName(token)) then
+                    return token, uName
+                end
+            end
+        end
+    end
+
+    return nil, nil
+end
 
 -- **********************************************************************************
 -- Populates the passed event data with overheal info.

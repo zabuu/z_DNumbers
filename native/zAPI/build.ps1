@@ -27,3 +27,16 @@ $command = 'call "' + $vcvars + '" x86 >nul && cl /nologo /LD /O1 /MT /EHsc ' +
 
 cmd.exe /d /s /c $command
 if ($LASTEXITCODE -ne 0) { throw "zAPI build failed with exit code $LASTEXITCODE" }
+
+$rootDll = "g:\Games\OctoWoW\zAPI.dll"
+if (Test-Path "g:\Games\OctoWoW") {
+    try {
+        Copy-Item (Join-Path $output "zAPI.dll") $rootDll -Force -ErrorAction Stop
+        Write-Host "Deployed zAPI.dll to $rootDll"
+    } catch {
+        $tempOld = "g:\Games\OctoWoW\zAPI_" + (Get-Random) + ".old"
+        Move-Item $rootDll $tempOld -Force
+        Copy-Item (Join-Path $output "zAPI.dll") $rootDll -Force
+        Write-Host "Deployed zAPI.dll to $rootDll (previous version moved to $tempOld)"
+    }
+}

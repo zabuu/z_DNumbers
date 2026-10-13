@@ -319,8 +319,8 @@ function MikSBT.OnUpdate()
 
    -- Clear the merged animation events array.
    local numMergedEvents = table.getn(mergeData.MergedEvents);
-   for i = 1, numMergedEvents do
-    table.remove(mergeData.MergedEvents, 1);
+   for i = numMergedEvents, 1, -1 do
+    table.remove(mergeData.MergedEvents, i);
    end
 
 
@@ -1707,6 +1707,45 @@ end
 
 
 -- **********************************************************************************
+-- Resolve each effect once. Prefer direct spell metadata to hidden tooltip
+-- scans; unknown names wait briefly before another inventory/aura search.
+-- Explicit textures remain authoritative, including merged-event textures.
+function MikSBT.ResolveEffectIcon(effectName, explicitTexture, spellID)
+ if explicitTexture then return explicitTexture end
+ local name = type(effectName) == "string" and string.gsub(effectName, " %(%d+%)", "") or nil;
+ local key = name and strlower(name);
+ if key and ICON_CACHE[key] then return ICON_CACHE[key] end
+ local now = GetTime();
+ if key and not spellID and type(NO_ICON_CACHE[key]) == "number" and NO_ICON_CACHE[key] > now then return nil end
+
+ local texture;
+ if C_Spell and C_Spell.GetSpellTexture then
+  local ok;
+  if spellID then ok, texture = pcall(C_Spell.GetSpellTexture, spellID); if not ok then texture = nil end end
+  if not texture and name then ok, texture = pcall(C_Spell.GetSpellTexture, name); if not ok then texture = nil end end
+ end
+ if not texture and name then
+  local ok, found = pcall(BS.GetSpellIcon, BS, name);
+  if ok then texture = found end
+ end
+ if not texture and name then
+  local bufftype, index, _, auraTexture = MikSBT.FindBuff(name);
+  if auraTexture then texture = auraTexture
+  elseif bufftype == "buff" then texture = UnitBuff("player", index)
+  elseif bufftype == "debuff" then texture = UnitDebuff("player", index) end
+ end
+ if not texture and name then
+  local first, _, third = MikSBT.FindItemIcon(name);
+  texture = type(first) == "string" and first or third;
+ end
+ if key then
+  if texture then ICON_CACHE[key] = texture; NO_ICON_CACHE[key] = nil
+  else NO_ICON_CACHE[key] = now + 2 end
+ end
+ return texture;
+end
+
+-- **********************************************************************************
 -- Add the event to the appropriate scroll area's animation display array.
 -- **********************************************************************************
 function MikSBT.AddAnimation(animationEvent)
@@ -1836,40 +1875,8 @@ function MikSBT.AddAnimation(animationEvent)
  animDisplayInfo.FontObject:SetPoint(animDisplayInfo.AnchorPoint, animDisplayInfo.PositionX, animDisplayInfo.PositionY);
  
  -- Athene Edit - Spell Icon
- local texture
- if animationEvent.Texture then texture = animationEvent.Texture end
- if animationEvent.EffectName then
-	 local name = string.gsub(animationEvent.EffectName, " %(%d+%)", "")
-	 -- DEFAULT_CHAT_FRAME:AddMessage(animationEvent.EffectName)
-	 -- DEFAULT_CHAT_FRAME:AddMessage(name)
-	 -- texture = BS:GetSpellIcon(name)
-	 if ICON_CACHE[strlower(name)] then
-		texture = ICON_CACHE[strlower(name)]
-	 elseif not texture and MikSBT.FindBuff(name) then
-		local bufftype,index,_ = MikSBT.FindBuff(name)
-		local icon
-		if bufftype == "buff" then
-			icon = UnitBuff("player", index)
-			ICON_CACHE[strlower(name)] = icon
-			texture = icon
-		elseif bufftype == "debuff" then
-			icon = UnitDebuff("player", index)
-			ICON_CACHE[strlower(name)] = icon
-			texture = icon
-		else
-			texture = nil
-			NO_ICON_CACHE[strlower(name)] = 1
-		end
-	 elseif not texture and BS:GetSpellIcon(name) then
-		texture = BS:GetSpellIcon(name)
-	 elseif not texture and MikSBT.FindItemIcon(name) then
-		texture = MikSBT.FindItemIcon(name)
-		ICON_CACHE[strlower(name)] = MikSBT.FindItemIcon(name)
-	 elseif not texture then
-		texture = nil
-		NO_ICON_CACHE[strlower(name)] = 1
-	 end
- end
+ local texture = MikSBT.ResolveEffectIcon(animationEvent.EffectName, animationEvent.Texture,
+   animationEvent.SpellID or animationEvent.SpellId or animationEvent.spellId);
  
  if texture then
   -- local frame
@@ -1959,6 +1966,23 @@ end
 -- **********************************************************************************
 function MikSBT.FindBuff( obuff, unit, item)
 	local buff=strlower(obuff);
+	unit = unit or "player";
+	local nativeAurasChecked = false;
+	if not item and C_UnitAuras and C_UnitAuras.GetUnitAuras then
+		local valid = 0;
+		for _, filter in ipairs({"HELPFUL", "HARMFUL"}) do
+			local ok, auras = pcall(C_UnitAuras.GetUnitAuras, unit, filter);
+			if ok and type(auras) == "table" then
+				valid = valid + 1;
+				for index, aura in ipairs(auras) do
+					if aura.name and strlower(aura.name) == buff then
+						return filter == "HELPFUL" and "buff" or "debuff", index, aura.name, aura.icon;
+					end
+				end
+			end
+		end
+		nativeAurasChecked = valid == 2;
+	end
 	local tooltip=MSBT_Tooltip;
 	local textleft1=getglobal(tooltip:GetName().."TextLeft1");
 	if ( not unit ) then
@@ -2000,6 +2024,7 @@ function MikSBT.FindBuff( obuff, unit, item)
 		tooltip:Hide();
 		return "track",b;
 	end
+	if nativeAurasChecked then tooltip:Hide(); return end
 	local c=nil;
 	for i=1, 32 do
 		tooltip:SetOwner(UIParent, "ANCHOR_NONE");
