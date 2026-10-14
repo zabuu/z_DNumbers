@@ -21,6 +21,14 @@ for the first login. zDNumbers lists it as an optional load-order dependency so
 the previous `MikSBT_Save` profile and per-character placement values can be
 picked up and saved under zDNumbers.
 
+Fresh installs use the saved Zabbu preset for attachment settings and the
+embedded MSBT factory profile: 55% source-icon opacity, 142 px travel height,
+0.65 sec attachment fade delay, 30% perspective depth, Expressway typography,
+and the captured MSBT colors, text speed, scroll areas and notifications.
+Existing character settings and saved MSBT profiles are not overwritten.
+Explicit resets/new MSBT profiles use the new factory preset. Other locales
+fall back to a valid bundled/client font when Expressway is unavailable.
+
 ## Nameplate compatibility
 
 The attachment layer first checks common exposed health-bar fields, then scans

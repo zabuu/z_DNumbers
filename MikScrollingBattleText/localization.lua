@@ -1334,3 +1334,9 @@ MikSBT.DEFAULT_CONFIG = {
   },
  },
 };
+
+-- Customize the factory template before MSBT creates a fresh profile.
+-- Existing MikSBT_Save profiles are not modified by this operation.
+if zDNumbers and zDNumbers.ApplyEmbeddedMSBTDefaults then
+ zDNumbers.ApplyEmbeddedMSBTDefaults(MikSBT.DEFAULT_CONFIG, MikSBT.AVAILABLE_FONTS);
+end

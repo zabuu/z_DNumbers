@@ -4,13 +4,13 @@ local Z = zDNumbers
 local defaults = {
   enabled = "1",
   icons = "1",
-  icon_opacity = "30",
-  perspective_tilt = "12",
+  icon_opacity = "55",
+  perspective_tilt = "30",
   x = "0",
   y = "8",
   width = "120",
-  height = "80",
-  fade = ".5",
+  height = "142",
+  fade = ".65",
   align = "CENTER",
 }
 
