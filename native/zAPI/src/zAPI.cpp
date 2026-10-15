@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "MinHook.h"
+#include "ScopedPetCommand.h"
 
 namespace {
 
@@ -38,6 +39,10 @@ constexpr uintptr_t kFrameScriptGetObject = 0x006F3740;
 constexpr uintptr_t kUnitGuid = 0x00515970;
 constexpr uintptr_t kGetObjectByGuid = 0x00464870;
 constexpr uintptr_t kSetTargetByGuid = 0x00493540;
+constexpr uintptr_t kPetCommandDispatch = 0x004BD1D0;
+constexpr uintptr_t kFrameScriptContext = 0x00CEEAC0;
+constexpr uintptr_t kFrameScriptDepth = 0x00CEEAC4;
+constexpr uintptr_t kInWorld = 0x00B4B424;
 constexpr uintptr_t kEnumVisibleObjects = 0x00468380;
 constexpr uintptr_t kGetActiveCamera = 0x004818F0;
 constexpr uintptr_t kUnitGetNamePosition = 0x00608640;
@@ -131,6 +136,7 @@ volatile LONG g_initClaimed = 0;
 volatile LONG g_initDone = 0;
 volatile LONG g_initResult = 1;
 volatile LONG g_mhInitialized = 0;
+volatile LONG g_petCommandBusy = 0;
 bool g_textHookInstalled = false;
 std::unordered_map<void *, std::vector<float>> g_fontBaselines;
 std::unordered_map<void *, std::vector<float>> g_fontWarped;
@@ -406,6 +412,70 @@ bool ResolveUnit(const char *identifier, uint32_t &unit) {
   if (!IsReadable(unit, 0x11C)) return false;
   const int objectType = *reinterpret_cast<int *>(unit + 0x14);
   return objectType == kObjectTypeUnit || objectType == kObjectTypePlayer;
+}
+
+bool PetCommandBridgeAvailable() {
+  // Fail closed if another client build or a detour changes this ABI.
+  // Byte-verified against the installed 1.12.1.5875 PetAttack dispatcher.
+  static const uint8_t prefix[] = {
+      0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x40, 0x53, 0x56, 0x57, 0x8B, 0xF9,
+      0xB9, 0x02, 0x00, 0x00, 0x00, 0x8B, 0xF2, 0x89, 0x7D, 0xFC};
+  const uintptr_t dispatch = At<uintptr_t>(kPetCommandDispatch);
+  return CompatibleClient() && IsReadable(dispatch, sizeof(prefix)) &&
+         std::memcmp(reinterpret_cast<const void *>(dispatch), prefix,
+                     sizeof(prefix)) == 0 &&
+         IsReadable(At<uintptr_t>(kFrameScriptContext), sizeof(uint32_t)) &&
+         IsReadable(At<uintptr_t>(kFrameScriptDepth), sizeof(uint32_t)) &&
+         IsReadable(At<uintptr_t>(kInWorld), sizeof(uint8_t));
+}
+
+bool LivingUnit(uint32_t unit) {
+  if (!IsReadable(unit + 0x110, sizeof(uint32_t))) return false;
+  const uint32_t descriptor = *reinterpret_cast<const uint32_t *>(unit + 0x110);
+  return descriptor != 0 && IsReadable(descriptor + 0x40, sizeof(uint32_t)) &&
+         *reinterpret_cast<const uint32_t *>(descriptor + 0x40) != 0;
+}
+
+bool SafePetCommand(const char *command, const char *identifier,
+                    const char *&reason) {
+  // A small allowlist, never a caller-supplied opcode or arbitrary script.
+  uint32_t opcode = 0;
+  if (!command) { reason = "missing pet command"; return false; }
+  if (std::strcmp(command, "attack") == 0) opcode = 0x07000002;
+  else if (std::strcmp(command, "follow") == 0) opcode = 0x07000001;
+  else if (std::strcmp(command, "stay") == 0) opcode = 0x07000000;
+  else if (std::strcmp(command, "passive") == 0) opcode = 0x06000000;
+  else { reason = "unsupported pet command"; return false; }
+  __try {
+    if (!PetCommandBridgeAvailable()) {
+      reason = "unsupported pet command dispatcher"; return false;
+    }
+    if (*At<const uint8_t *>(kInWorld) == 0) {
+      reason = "not in world"; return false;
+    }
+    uint32_t pet = 0;
+    if (!ResolveUnit("pet", pet) || !LivingUnit(pet)) {
+      reason = "no living active pet"; return false;
+    }
+    uint64_t victim = 0;
+    if (opcode == 0x07000002) {
+      uint32_t target = 0;
+      victim = ResolveGuid(identifier);
+      if (!victim || !ResolveUnit(identifier, target) || !LivingUnit(target) ||
+          target == pet || victim == ResolveGuid("player")) {
+        reason = "invalid pet attack target"; return false;
+      }
+    }
+    const bool submitted = DispatchScopedPetCommand(
+        At<PetCommandDispatchFn>(kPetCommandDispatch),
+        At<uint32_t *>(kFrameScriptContext), At<uint32_t *>(kFrameScriptDepth),
+        &g_petCommandBusy, opcode, victim);
+    if (!submitted) reason = "pet dispatcher busy or native exception";
+    return submitted;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    reason = "native pet command validation exception";
+    return false;
+  }
 }
 
 bool UnitPosition(uint32_t unit, Vec3 &position) {
@@ -905,7 +975,22 @@ int __fastcall Script_zAPI(void *L) {
   }
 
   if (std::strcmp(command, "version") == 0) {
-    LuaPushNumber(L, 1.9);
+    LuaPushNumber(L, 2.0);
+    return 1;
+  }
+
+  if (std::strcmp(command, "petCommandVersion") == 0) {
+    LuaPushNumber(L, PetCommandBridgeAvailable() ? 1.0 : 0.0);
+    return 1;
+  }
+
+  if (std::strcmp(command, "petCommand") == 0) {
+    const char *reason = nullptr;
+    const char *action = LuaGetTop(L) >= 2 ? LuaToString(L, 2) : nullptr;
+    const char *unit = LuaGetTop(L) >= 3 ? LuaToString(L, 3) : nullptr;
+    const bool submitted = SafePetCommand(action, unit, reason);
+    LuaPushNumber(L, submitted ? 1.0 : 0.0);
+    if (!submitted) { LuaPushString(L, reason ? reason : "pet command rejected"); return 2; }
     return 1;
   }
 

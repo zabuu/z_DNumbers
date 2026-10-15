@@ -72,11 +72,13 @@ lua.execute('''
 fresh={}; merge(fresh)
 assert(fresh.icon_opacity=="55" and fresh.perspective_tilt=="30" and fresh.height=="142" and fresh.fade==".65")
 assert(fresh.width=="120" and fresh.x=="0" and fresh.y=="8" and fresh.align=="CENTER")
+assert(fresh.split_pet=="0" and not fresh.pet_side)
 assert(not fresh.native_cards and not fresh.zNameplatesImport)
-established={enabled="0",icons="0",height="71",fade=".9",native_cards="old",customValue="keep",zNameplatesImport="1"}
+established={enabled="0",icons="0",height="71",fade=".9",native_cards="old",customValue="keep",zNameplatesImport="1",split_pet="1",pet_side="LEFT"}
 merge(established)
 assert(established.enabled=="0" and established.icons=="0" and established.height=="71" and established.fade==".9")
 assert(established.customValue=="keep" and established.native_cards=="old" and established.zNameplatesImport=="1")
+assert(established.split_pet=="1" and established.pet_side=="LEFT")
 ''')
 
 # Locale-specific font lists must not get out-of-range saved English indices.
@@ -104,7 +106,8 @@ if account.exists() and character.exists():
     assert plain(runtime().globals().MikSBT.DEFAULT_CONFIG) == plain(save.Profiles[save.CurrentProfile])
     saved.execute(character.read_text(encoding="utf-8-sig"))
     for key, value in lua.globals().zDNumbers.defaults.items():
-        assert value == saved.globals().zDNumbersDB[key], key
+        if key not in {"split_pet", "pet_side"}:  # New opt-in controls were not in the captured preset.
+            assert value == saved.globals().zDNumbersDB[key], key
 
 toc = (root / "z_DNumbers.toc").read_text(encoding="utf-8-sig")
 assert toc.index("default_profile.lua") < toc.index("MikScrollingBattleText\\localization.lua")

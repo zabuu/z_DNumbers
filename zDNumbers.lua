@@ -12,6 +12,7 @@ local defaults = {
   height = "142",
   fade = ".65",
   align = "CENTER",
+  split_pet = "0",
 }
 
 local function MergeDefaults(target)
@@ -47,7 +48,9 @@ end
 Z.defaults = defaults
 Z.Reset = ResetConfig
 
-local TEXT_SLOTS = 10
+local STREAM_SLOTS = 10
+local TEXT_SLOTS = STREAM_SLOTS * 2
+local PET_STREAM_GAP = 2
 local SOURCE_ICON_SCALE = .70
 local RESULT_ICON_SCALE = .70
 local ICON_TEXT_GAP = 3
@@ -76,6 +79,8 @@ local cachedWorldChildCount = -1
 local nextPlateScan = 0
 local nextLegacyPlateScan = 0
 local lastOutgoingPlateScan
+local petScreenSample = {}
+local petWorldSample = {}
 local sourceSpellIcons = {}
 local sourceSpellbookScanned
 local sourceSpellLibrary
@@ -196,6 +201,12 @@ local function Alignment()
   return "BOTTOM", "CENTER"
 end
 
+local function IsPetAnimation(animationEvent)
+  -- MSBT's parser marks the source before formatting/recycling the event.
+  return type(animationEvent.EventType) == "string"
+    and string.find(animationEvent.EventType, "^MSBT_EVENTTYPE_OUTGOING_PET_") ~= nil
+end
+
 local function NativeProject(record, verticalOffset)
   if type(zAPI) ~= "function" or not record then return end
   local identifier = record.guid or record.unit
@@ -236,6 +247,65 @@ local function FrameBottomAnchor(frame, anchor)
   if anchor == "BOTTOMLEFT" then return left, bottom end
   if anchor == "BOTTOMRIGHT" then return right, bottom end
   return (left + right) * .5, bottom
+end
+
+local function PetScreenPosition(now)
+  -- One camera projection per rendered frame, shared by every active stream.
+  if petScreenSample.time == now and petScreenSample.api == zAPI then
+    return petScreenSample.x, petScreenSample.y
+  end
+  petScreenSample.time, petScreenSample.api = now, zAPI
+  petScreenSample.x, petScreenSample.y = nil, nil
+  if UnitExists and not UnitExists("pet") then return end
+  if type(zAPI) == "function" then
+    local ok, x, y, depth = pcall(zAPI, "projectUnit", "pet", 0)
+    if ok and type(x) == "number" and type(y) == "number" and x == x and y == y
+        and type(depth) == "number" and depth > 0 then
+      petScreenSample.x, petScreenSample.y = x * UIParent:GetWidth(), y * UIParent:GetHeight()
+      return petScreenSample.x, petScreenSample.y
+    end
+    -- A pet behind the camera/projection gap has no trustworthy direction.
+    -- Do not switch to a clamped native plate and accidentally reverse it.
+    return
+  end
+  -- Without the DLL, a visible pet nameplate can still supply a screen point.
+  local guid = UnitGUID and UnitGUID("pet")
+  local petRecord = recordsByUnit.pet or (guid and recordsByGuid[guid])
+  local petFrame
+  if petRecord and not petRecord.frozen and petRecord.base
+      and (not petRecord.base.IsVisible or petRecord.base:IsVisible()) then
+    -- Its healthbar may be hidden by the host addon; it still has a valid center.
+    petFrame = petRecord.anchor or petRecord.base
+  end
+  if not petFrame and C_NamePlate and C_NamePlate.GetNamePlateForUnit then
+    petFrame = C_NamePlate.GetNamePlateForUnit("pet")
+  end
+  if petFrame and petFrame.GetCenter and (petRecord or not petFrame.IsVisible or petFrame:IsVisible()) then
+    local x, y = petFrame:GetCenter()
+    if x and y then
+      local scale = (petFrame.GetEffectiveScale and petFrame:GetEffectiveScale() or 1)
+        / math.max(.001, UIParent:GetEffectiveScale())
+      petScreenSample.x, petScreenSample.y = x * scale, y * scale
+    end
+  end
+  return petScreenSample.x, petScreenSample.y
+end
+
+local function PetWorldPosition(now)
+  -- Read only XY: terrain/pet height must never pitch the orbit. Share this
+  -- snapshot across all active nameplates, including a pet off screen.
+  if petWorldSample.time == now and petWorldSample.api == zAPI then
+    return petWorldSample.x, petWorldSample.y
+  end
+  petWorldSample.time, petWorldSample.api = now, zAPI
+  petWorldSample.x, petWorldSample.y = nil, nil
+  if type(zAPI) ~= "function" or UnitExists and not UnitExists("pet") then return end
+  local ok, x, y = pcall(zAPI, "unitPosition", "pet")
+  if ok and type(x) == "number" and type(y) == "number" and x == x and y == y
+      and math.abs(x) < math.huge and math.abs(y) < math.huge then
+    petWorldSample.x, petWorldSample.y = x, y
+  end
+  return petWorldSample.x, petWorldSample.y
 end
 
 local function SourceIconAlpha()
@@ -446,10 +516,16 @@ local function ClearAnimations(record)
   if not record or not record.frame then return end
   animatingRecords[record] = nil
   record.frame.spacingLastTime = nil
+  record.frame.petStreamOffset = nil
+  record.frame.petStreamOffsetY, record.frame.petStreamAngle = nil, nil
+  record.frame.petStreamYaw, record.frame.petStreamRadius = nil, nil
+  record.frame.petZipper = nil
+  record.frame.petStreamWorldX, record.frame.petStreamWorldY, record.frame.petStreamWorldZ = nil, nil, nil
   for i = 1, TEXT_SLOTS do
     local item = record.frame.items[i]
     if item then
       item.active = nil
+      item.petOrbitRadius, item.petPlacedTime = nil, nil
       SetTextPerspective(item, 0)
       item.text:Hide()
       SetSourceIconShown(item, false)
@@ -749,7 +825,7 @@ local function Enabled()
   return enabled
 end
 
-local function QueueGuidHint(targetGuid, amount, spellId)
+local function QueueGuidHint(targetGuid, amount, spellId, isPet)
   if not targetGuid or targetGuid == "0x0000000000000000" then return end
   local now = GetTime()
   for i = table.getn(outgoingGuidHints), 1, -1 do
@@ -763,6 +839,7 @@ local function QueueGuidHint(targetGuid, amount, spellId)
     effectName = effectName,
     spellId = spellId,
     isSpell = spellId ~= nil,
+    isPet = isPet and true or false,
     time = now,
   })
 end
@@ -771,9 +848,10 @@ local function ConsumeGuidHint(animationEvent)
   local now = GetTime()
   local amount = animationEvent.Amount and tonumber(animationEvent.Amount) or nil
   local isSpell = animationEvent.EffectName ~= nil
+  local isPet = IsPetAnimation(animationEvent)
   for i = 1, table.getn(outgoingGuidHints) do
     local hint = outgoingGuidHints[i]
-    if now - hint.time <= 1.5 and hint.amount == amount and hint.isSpell == isSpell and
+    if now - hint.time <= 1.5 and hint.isPet == isPet and hint.amount == amount and hint.isSpell == isSpell and
         (not hint.effectName or not animationEvent.EffectName or hint.effectName == animationEvent.EffectName) then
       if hint.spellId and not animationEvent.SpellID then animationEvent.SpellID = hint.spellId end
       table.remove(outgoingGuidHints, i)
@@ -823,18 +901,25 @@ local function AddAnimation(record, animationEvent)
   local frame = record.frame
   local now = GetTime()
   if not frame:IsShown() then frame.spacingLastTime = now end
-  local slot, oldest
+  local isPet = IsPetAnimation(animationEvent)
+  local split = Z.config.split_pet == "1"
+  local slot, oldest, freeIndex
+  local streamCount = 0
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
-    if not item then item = CreateAnimationItem(frame); frame.items[i] = item end
-    if not item.active then
-      slot = item
-      break
-    elseif not oldest or item.startTime < oldest.startTime then
-      oldest = item
+    if not item or not item.active then
+      if not freeIndex then freeIndex = i end
+    elseif not split or item.isPet == isPet then
+      streamCount = streamCount + 1
+      if not oldest or item.startTime < oldest.startTime then oldest = item end
     end
   end
-  slot = slot or oldest
+  if streamCount >= STREAM_SLOTS then
+    slot = oldest
+  elseif freeIndex then
+    slot = frame.items[freeIndex] or CreateAnimationItem(frame)
+    frame.items[freeIndex] = slot
+  end
   if not slot then return end
 
   local settings = animationEvent.EventSettings
@@ -846,6 +931,9 @@ local function AddAnimation(record, animationEvent)
   local colorB = settings.FontSettings.Color.b
   local anchor, justify = Alignment()
   slot.active = true
+  slot.isPet = isPet
+  slot.pendingRender = true
+  slot.text:Hide()
   slot.startTime = now
   slot.lastUpdate = now
   slot.position = 0
@@ -858,6 +946,8 @@ local function AddAnimation(record, animationEvent)
   slot.nativeTravel = nil
   slot.nativeBaseX, slot.nativeBaseY, slot.nativeBaseZ = nil, nil, nil
   slot.nativeCorrectionX, slot.nativeCorrectionY = nil, nil
+  slot.nativeScreenDepth = nil
+  slot.petOrbitRadius, slot.petPlacedTime = nil, nil
   slot.perspectiveWarp = 0
   SetTextPerspective(slot, 0)
   slot.appliedPerspective, slot.perspectiveAPI = nil, nil
@@ -902,17 +992,22 @@ local function AddAnimation(record, animationEvent)
     and (not animationEvent.Amount or tonumber(animationEvent.Amount) == 0)
   slot.text:SetText(iconOnlyResult and "" or animationEvent.Text)
   slot.collisionTextHeight = nil
+  slot.collisionTextWidth = nil
   slot.text:SetAlpha(1)
   slot.appliedAlpha = 1
-  slot.text:Show()
   ConfigureSourceIcon(slot)
   ConfigureResultIcon(slot)
+  -- Wait for the next layout pass to reveal a new slot: a pet event must not
+  -- flash in the main column for one rendered frame before its lane is known.
+  SetSourceIconShown(slot, false)
+  SetSourceIconShown(slot.result, false)
   frame:Show()
   animatingRecords[record] = true
 end
 
 local function RetireAnimationItem(item)
   item.active = nil
+  item.pendingRender = nil
   item.stackOffset, item.displayPosition, item.stackTarget = nil, nil, nil
   item.native3D = nil
   item.visualSize = nil
@@ -924,6 +1019,7 @@ local function RetireAnimationItem(item)
 end
 
 local function NativeAnimationPlacement(record, item, anchor, height)
+  item.nativeScreenDepth = nil
   if not item.native3D or not UIParent or not UIParent.GetWidth
       or not UIParent.GetHeight then return end
   local progress = math.max(0, math.min(1, (item.displayPosition or item.position) / height))
@@ -967,6 +1063,9 @@ local function NativeAnimationPlacement(record, item, anchor, height)
   end
   if not item.nativeCorrectionX or not item.nativeCorrectionY then return end
 
+  item.nativeScreenX, item.nativeScreenY, item.nativeScreenDepth = pointX, pointY, pointDepth
+  item.nativeBaseScreenX, item.nativeBaseScreenY, item.nativeBaseScreenDepth = baseX, baseY, baseDepth
+
   local scale = baseDepth / pointDepth
   scale = math.max(NATIVE_MIN_SCALE, math.min(NATIVE_MAX_SCALE, scale))
   item.visualSize = (item.fontSize or 12) * scale
@@ -980,7 +1079,7 @@ local function NativeAnimationPlacement(record, item, anchor, height)
     pointY * uiHeight + item.nativeCorrectionY
 end
 
-local function ResolveAnimationSpacing(frame, height, elapsed)
+local function ResolveAnimationSpacing(frame, height, elapsed, zipper)
   local layout = frame.collisionLayout
   if not layout then
     layout = {}
@@ -1000,7 +1099,7 @@ local function ResolveAnimationSpacing(frame, height, elapsed)
 
   -- Avoid table.getn/table.insert/table.sort here. Vanilla-compatible clients
   -- can preserve a stale implicit array size on reused tables, producing nil
-  -- holes. Ten slots are cheaper and safer to sort explicitly.
+  -- holes. The small bounded pools are cheap and safe to sort explicitly.
   for i = 2, count do
     local item = layout[i]
     local index = i - 1
@@ -1013,12 +1112,43 @@ local function ResolveAnimationSpacing(frame, height, elapsed)
     layout[index + 1] = item
   end
 
-  local previous
+  if zipper then
+    -- Front/back streams share a column. Weave their individual slots instead
+    -- of reserving the entire main stack as one solid obstacle. Keep the order
+    -- within each source; unequal bursts use the remaining slots normally.
+    local main = frame.zipperMain or {}
+    local pet = frame.zipperPet or {}
+    frame.zipperMain, frame.zipperPet = main, pet
+    local mainCount, petCount = 0, 0
+    for i = 1, count do
+      local item = layout[i]
+      if item.isPet then petCount = petCount + 1; pet[petCount] = item
+      else mainCount = mainCount + 1; main[mainCount] = item end
+    end
+    for i = mainCount + 1, frame.zipperMainCount or 0 do main[i] = nil end
+    for i = petCount + 1, frame.zipperPetCount or 0 do pet[i] = nil end
+    frame.zipperMainCount, frame.zipperPetCount = mainCount, petCount
+    local nextPet = count > 0 and layout[1].isPet
+    local mainIndex, petIndex = 1, 1
+    for i = 1, count do
+      if petIndex <= petCount and (nextPet or mainIndex > mainCount) then
+        layout[i] = pet[petIndex]; petIndex = petIndex + 1; nextPet = false
+      else
+        layout[i] = main[mainIndex]; mainIndex = mainIndex + 1; nextPet = true
+      end
+    end
+  end
+
+  local previousMain, previousPet
+  local split = Z.config.split_pet == "1"
   -- Natural travel stays untouched. Ease only the extra collision displacement
   -- so a newly arriving event never teleports every existing number upward.
   local blend = 1 - math.exp(-math.max(0, math.min(.1, elapsed or 1/60)) / .075)
   for i = 1, count do
     local item = layout[i]
+    local petStream = split and item.isPet and not zipper
+    local previous = previousMain
+    if petStream then previous = previousPet end
     local target = item.position
     if previous then
       -- Bottom-anchored text needs the lower entry's actual height, not an
@@ -1029,9 +1159,17 @@ local function ResolveAnimationSpacing(frame, height, elapsed)
         if previous.appliedTextHeight then previous.collisionTextHeight = textHeight end
       end
       local footprint = math.max(1, textHeight or previous.fontSize or 12)
-      if previous.icon and previous.icon:IsShown() then footprint = math.max(footprint,previous.configuredIconSize or previous.icon:GetHeight()) end
-      if previous.result and previous.result.icon:IsShown() then footprint = math.max(footprint,previous.result.configuredIconSize or previous.result.icon:GetHeight()) end
-      local minimumGap = footprint + 2
+      if previous.icon and (previous.icon:IsShown() or
+          previous.pendingRender and previous.iconTexture and Z.config.icons == "1") then
+        footprint = math.max(footprint, previous.configuredIconSize or previous.icon:GetHeight())
+      end
+      if previous.result and (previous.result.icon:IsShown() or
+          previous.pendingRender and previous.result.iconTexture) then
+        footprint = math.max(footprint, previous.result.configuredIconSize or previous.result.icon:GetHeight())
+      end
+      -- Shared rows need outline clearance and the small pet-facing offset;
+      -- otherwise even a two-pixel orbit can skip past the next main row.
+      local minimumGap = footprint + (zipper and 6 or 2)
       target = math.max(target, previous.stackTarget + minimumGap)
     end
     item.stackTarget = target
@@ -1046,8 +1184,220 @@ local function ResolveAnimationSpacing(frame, height, elapsed)
       -- the oldest/topmost entries early instead of drawing them together.
       RetireAnimationItem(item)
     else
-      previous = item
+      if petStream then previousPet = item else previousMain = item end
     end
+  end
+end
+
+local function AnimationBounds(item, anchor, x, y, scale)
+  local width = item.collisionTextWidth
+  if width == nil then
+    width = item.text.GetStringWidth and item.text:GetStringWidth() or item.fontSize or 12
+    item.collisionTextWidth = width
+  end
+  width = math.max(0, width) * scale
+  -- Include the exaggerated glyph trapezoid, outline, and both icon gutters.
+  local warpPadding = width * math.max(0, item.perspectiveWarp or 0) * .5
+  local left = anchor == "BOTTOMLEFT" and x or anchor == "BOTTOMRIGHT" and x - width or x - width * .5
+  local right = left + width
+  local height = item.collisionTextHeight
+  if height == nil then
+    height = item.text.GetStringHeight and item.text:GetStringHeight() or item.fontSize or 12
+    item.collisionTextHeight = height
+  end
+  height = math.max(0, height) * scale
+  local bottom, top = y, y + height
+  local iconHeight = 0
+  if item.icon:IsShown() then left = left - ((item.configuredIconSize or item.icon:GetWidth()) + ICON_TEXT_GAP) * scale end
+  if item.result.icon:IsShown() then right = right + ((item.result.configuredIconSize or item.result.icon:GetWidth()) + ICON_TEXT_GAP) * scale end
+  if item.icon:IsShown() then iconHeight = item.configuredIconSize or item.icon:GetHeight() end
+  if item.result.icon:IsShown() then iconHeight = math.max(iconHeight, item.result.configuredIconSize or item.result.icon:GetHeight()) end
+  iconHeight = iconHeight * scale
+  bottom, top = math.min(bottom, y + (height - iconHeight) * .5), math.max(top, y + (height + iconHeight) * .5)
+  return left - warpPadding - scale, right + warpPadding + scale, bottom - scale, top + scale
+end
+
+local function NativePetOrbit(record, frame, now, elapsed)
+  local reference
+  for i = 1, TEXT_SLOTS do
+    local item = frame.items[i]
+    if item and item.active and item.isPet then
+      if not item.native3D
+          or not item.nativeBaseX or not item.nativeBaseY or not item.nativeBaseZ then return end
+      reference = reference or item
+    end
+  end
+  if not reference then return end
+  local baseX, baseY, baseDepth, worldX, worldY, worldZ
+  if record.frozen then
+    worldX, worldY, worldZ = reference.nativeBaseX, reference.nativeBaseY, reference.nativeBaseZ
+    baseX, baseY, baseDepth = NativeWorldToScreen(worldX, worldY, worldZ)
+  else
+    baseX, baseY, baseDepth, worldX, worldY, worldZ = NativeProject(record, 0)
+  end
+  if not baseX or not worldX or not worldY or not worldZ then return end
+  local yaw = frame.petStreamYaw
+  local petX, petY
+  if not record.frozen then petX, petY = PetWorldPosition(now) end
+  if petX and petY then
+    local dx, dy = petX - worldX, petY - worldY
+    if dx * dx + dy * dy > .1 * .1 then
+      local desired = math.atan2(dy, dx)
+      if yaw then
+        local difference = desired - yaw
+        if difference > math.pi then difference = difference - 2 * math.pi end
+        if difference < -math.pi then difference = difference + 2 * math.pi end
+        yaw = yaw + difference * (1 - math.exp(-math.max(0, math.min(.1, elapsed)) / .10))
+      else yaw = desired end
+    end
+  end
+  if not yaw then return end
+  if yaw > math.pi then yaw = yaw - 2 * math.pi end
+  if yaw < -math.pi then yaw = yaw + 2 * math.pi end
+  frame.petStreamYaw = yaw
+  local dx, dy = math.cos(yaw), math.sin(yaw)
+  -- The ring starts at the SAME world Z as regular numbers, even on slopes.
+  local probeX, probeY, probeDepth = NativeWorldToScreen(worldX + dx, worldY + dy, worldZ)
+  if not probeX then return end
+  local width, height = UIParent:GetWidth(), UIParent:GetHeight()
+  local rayX, rayY = (probeX - baseX) * width, (probeY - baseY) * height
+  local rayLength = math.sqrt(rayX * rayX + rayY * rayY)
+  if rayLength < .01 then return end
+  frame.petStreamAngle = math.atan2(rayY, rayX)
+  -- Hysteresis avoids changing slot order for tiny camera/pet movements.
+  local verticality = math.abs(rayY) / rayLength
+  if verticality >= .80 then frame.petZipper = true
+  elseif verticality < .65 then frame.petZipper = nil end
+  local orbit = frame.petOrbit or {}
+  frame.petOrbit = orbit
+  -- One probe still supplies exact perspective for every individual number.
+  orbit.native, orbit.depthDelta, orbit.baseDepth = true, probeDepth - baseDepth, baseDepth
+  orbit.numeratorX, orbit.numeratorY = probeX * probeDepth - baseX * baseDepth,
+    probeY * probeDepth - baseY * baseDepth
+  orbit.pixelX, orbit.pixelY, orbit.minimum = rayX / rayLength, rayY / rayLength, PET_STREAM_GAP / rayLength
+  orbit.worldX, orbit.worldY, orbit.worldZ, orbit.dx, orbit.dy = worldX, worldY, worldZ, dx, dy
+  return orbit
+end
+
+local function PetStreamPlacement(frame, now, frozen, originX)
+  -- A screen-only fallback cannot recover world yaw. Keep its baseline level
+  -- and use left/right instead of mistaking pet elevation for an orbit angle.
+  local direction = math.cos(frame.petStreamAngle or 0) < 0 and -1 or 1
+  local petX
+  if not frozen then petX = PetScreenPosition(now) end
+  local dx = petX and petX - originX
+  if dx and math.abs(dx) > 16 then direction = dx < 0 and -1 or 1 end
+  frame.petStreamAngle = direction < 0 and math.pi or 0
+  frame.petZipper = nil
+  local orbit = frame.petFallbackOrbit or {}
+  frame.petFallbackOrbit = orbit
+  orbit.native, orbit.pixelX, orbit.pixelY, orbit.minimum = false, direction, 0, PET_STREAM_GAP
+  return orbit
+end
+
+local function AxisOverlapInterval(minimum, maximum, movement, depth, depthDelta, limit)
+  -- Solve overlap before perspective division: each axis contributes one
+  -- forbidden radius interval. A pair of text/icon boxes is not a whole stack.
+  local low, high = 0, limit
+  local coefficient, bound = movement - minimum * depthDelta, minimum * depth
+  if coefficient > .0000001 then low = math.max(low, bound / coefficient)
+  elseif coefficient < -.0000001 then high = math.min(high, bound / coefficient)
+  elseif bound > 0 then return end
+  coefficient, bound = movement - maximum * depthDelta, maximum * depth
+  if coefficient > .0000001 then high = math.min(high, bound / coefficient)
+  elseif coefficient < -.0000001 then low = math.max(low, bound / coefficient)
+  elseif bound < 0 then return end
+  if low < high then return low, high end
+end
+
+local function PetNumberRadius(frame, item, movementX, movementY, depth, depthDelta,
+    limit, minimum, native, now, elapsed, hasMain, originX, originY, scale)
+  local lows, highs = frame.petIntervalLow or {}, frame.petIntervalHigh or {}
+  frame.petIntervalLow, frame.petIntervalHigh = lows, highs
+  local count = 0
+  for i = 0, TEXT_SLOTS do
+    local obstacle = frame.items[i]
+    local left, right, bottom, top
+    if i == 0 and not hasMain then
+      left, right, bottom, top = originX - 6 * scale, originX + 6 * scale, originY, originY + 12 * scale
+    elseif obstacle and obstacle ~= item and obstacle.active then
+      if not obstacle.isPet then
+        left, right, bottom, top = obstacle.layoutLeft, obstacle.layoutRight, obstacle.layoutBottom, obstacle.layoutTop
+      elseif obstacle.petPlacedTime == now then
+        left, right, bottom, top = obstacle.petLeft, obstacle.petRight, obstacle.petBottom, obstacle.petTop
+      end
+    end
+    if left then
+      local lowX, highX = AxisOverlapInterval(left - PET_STREAM_GAP - item.layoutRight,
+        right + PET_STREAM_GAP - item.layoutLeft, movementX, depth, depthDelta, limit)
+      if lowX then
+        local lowY, highY = AxisOverlapInterval(bottom - PET_STREAM_GAP - item.layoutTop,
+          top + PET_STREAM_GAP - item.layoutBottom, movementY, depth, depthDelta, limit)
+        if lowY then
+          local low, high = math.max(lowX, lowY), math.min(highX, highY)
+          if low < high then
+            count = count + 1
+            local index = count
+            while index > 1 and lows[index - 1] > low do
+              lows[index], highs[index] = lows[index - 1], highs[index - 1]; index = index - 1
+            end
+            lows[index], highs[index] = low, high
+          end
+        end
+      end
+    end
+  end
+  -- Pick the first free gap along this number's pet-facing ray. No repeated
+  -- native projections or scene scans; the bounded interval arrays are reused.
+  local radius = minimum
+  for i = 1, count do
+    if radius < lows[i] then break end
+    if radius <= highs[i] then radius = highs[i] + .000001 end
+  end
+  if radius >= limit or radius == math.huge or radius ~= radius then return end
+  if item.petOrbitRadius and item.petOrbitNative == native then
+    local blend = 1 - math.exp(-math.max(0, math.min(.1, elapsed)) / .10)
+    local eased = math.max(radius, item.petOrbitRadius + (radius - item.petOrbitRadius) * blend)
+    local safe = eased < limit
+    for i = 1, count do
+      if eased >= lows[i] and eased <= highs[i] then safe = false; break end
+    end
+    if safe then radius = eased end
+  end
+  return radius
+end
+
+local function PlacePetNumber(frame, item, orbit, now, elapsed, hasMain, originX, originY, scale)
+  local native = orbit.native and item.nativeScreenDepth ~= nil
+  local depth, delta = 1, 0
+  local movementX, movementY, limit = orbit.pixelX, orbit.pixelY, math.huge
+  local minimum = PET_STREAM_GAP
+  if native then
+    depth, delta = item.nativeScreenDepth, orbit.depthDelta
+    movementX = (orbit.numeratorX - item.nativeScreenX * delta) * UIParent:GetWidth()
+    movementY = (orbit.numeratorY - item.nativeScreenY * delta) * UIParent:GetHeight()
+    if delta < 0 then limit = (math.min(depth, orbit.baseDepth) - .1) / -delta end
+    minimum = orbit.minimum
+  end
+  local radius = PetNumberRadius(frame, item, movementX, movementY, depth, delta,
+    limit, minimum, native, now, elapsed, hasMain, originX, originY, scale)
+  if not radius then
+    -- A near-plane/degenerate point still gets readable individual placement.
+    native, depth, delta = false, 1, 0
+    movementX, movementY = orbit.pixelX, orbit.pixelY
+    radius = PetNumberRadius(frame, item, movementX, movementY, depth, delta,
+      math.huge, PET_STREAM_GAP, native, now, elapsed, hasMain, originX, originY, scale) or 0
+  end
+  item.petOrbitRadius, item.petOrbitNative = radius, native
+  item.petOffsetX, item.petOffsetY = radius * movementX / (depth + radius * delta),
+    radius * movementY / (depth + radius * delta)
+  item.petLeft, item.petRight = item.layoutLeft + item.petOffsetX, item.layoutRight + item.petOffsetX
+  item.petBottom, item.petTop = item.layoutBottom + item.petOffsetY, item.layoutTop + item.petOffsetY
+  item.petPlacedTime = now
+  item.petOrbitWorldX, item.petOrbitWorldY, item.petOrbitWorldZ = nil, nil, nil
+  if native then
+    item.petOrbitWorldX, item.petOrbitWorldY, item.petOrbitWorldZ =
+      orbit.worldX + radius * orbit.dx, orbit.worldY + radius * orbit.dy, orbit.worldZ
   end
 end
 
@@ -1070,6 +1420,7 @@ local function UpdateAnimations(record, now)
   local iconAlpha = SourceIconAlpha()
   -- Move first, resolve collisions second, and render last. Keeping those
   -- phases separate prevents mixed crit/normal sizes from crossing visually.
+  local hasPet
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
     if item and item.active then
@@ -1078,14 +1429,27 @@ local function UpdateAnimations(record, now)
       if item.position >= height then
         RetireAnimationItem(item)
       end
+      if item.active and item.isPet then hasPet = true end
     end
   end
 
   local spacingElapsed = now - (frame.spacingLastTime or now - 1/60)
   frame.spacingLastTime = now
-  ResolveAnimationSpacing(frame, height, spacingElapsed)
+  local split = Z.config.split_pet == "1"
+  local frameScale = frame.GetEffectiveScale and frame:GetEffectiveScale() or 1
+  local uiScale = UIParent.GetEffectiveScale and UIParent:GetEffectiveScale() or 1
+  local scale = frameScale / math.max(.001, uiScale)
+  local originX, originY
+  if split then originX, originY = FrameBottomAnchor(frame, anchor) end
+  originX, originY = (originX or 0) * scale, (originY or 0) * scale
+  local petOrbit
+  if split and hasPet then
+    petOrbit = NativePetOrbit(record, frame, now, spacingElapsed)
+      or PetStreamPlacement(frame, now, record.frozen, originX)
+  else frame.petZipper = nil end
+  ResolveAnimationSpacing(frame, height, spacingElapsed, frame.petZipper)
 
-  local anyActive
+  local anyActive, hasMain
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
     if item and item.active then
@@ -1105,28 +1469,62 @@ local function UpdateAnimations(record, now)
         item.text:SetTextHeight(textHeight)
         item.appliedTextHeight = textHeight
         item.collisionTextHeight = nil
+        item.collisionTextWidth = nil
         item.appliedPerspective = nil
       end
-      if nativeX and nativeY then
-        if item.renderReference ~= UIParent or item.renderAnchor ~= anchor then item.text:ClearAllPoints() end
-        item.text:SetPoint(anchor, UIParent, "BOTTOMLEFT", nativeX, nativeY)
-        item.renderReference, item.renderAnchor = UIParent, anchor
-      else
+      if not nativeX or not nativeY then
         item.visualSize = item.fontSize
         item.perspectiveWarp = 0
-        if item.renderReference ~= frame or item.renderAnchor ~= anchor then item.text:ClearAllPoints() end
-        item.text:SetPoint(anchor, frame, anchor, 0, item.displayPosition or item.position)
-        item.renderReference, item.renderAnchor = frame, anchor
       end
-      SetTextPerspective(item, item.perspectiveWarp or 0)
       if item.appliedJustify ~= justify then item.text:SetJustifyH(justify); item.appliedJustify = justify end
       if item.appliedAlpha ~= alpha then item.text:SetAlpha(alpha); item.appliedAlpha = alpha end
-      if item.native3D then
+      if item.native3D or item.pendingRender then
         ConfigureSourceIcon(item)
         ConfigureResultIcon(item)
       end
       if item.icon:IsShown() then SetSourceIconAlpha(item, alpha * iconAlpha) end
       if item.result.icon:IsShown() then SetSourceIconAlpha(item.result, alpha) end
+      item.layoutX, item.layoutY = nativeX, nativeY
+      if split then
+        local left, right, bottom, top = AnimationBounds(item, anchor, nativeX or originX,
+          nativeY or originY + (item.displayPosition or item.position) * scale, scale)
+        item.layoutLeft, item.layoutRight, item.layoutBottom, item.layoutTop = left, right, bottom, top
+        if not item.isPet then hasMain = true end
+      end
+    end
+  end
+  frame.petStreamOffset, frame.petStreamOffsetY, frame.petStreamRadius = nil, nil, nil
+  frame.petStreamWorldX, frame.petStreamWorldY, frame.petStreamWorldZ = nil, nil, nil
+  if petOrbit then
+    for i = 1, frame.collisionLayoutCount or 0 do
+      local item = frame.collisionLayout[i]
+      if item.active and item.isPet then
+        PlacePetNumber(frame, item, petOrbit, now, spacingElapsed, hasMain, originX, originY, scale)
+        if not frame.petStreamOffset then
+          frame.petStreamOffset, frame.petStreamOffsetY, frame.petStreamRadius =
+            item.petOffsetX, item.petOffsetY, item.petOrbitRadius
+          frame.petStreamWorldX, frame.petStreamWorldY, frame.petStreamWorldZ =
+            item.petOrbitWorldX, item.petOrbitWorldY, item.petOrbitWorldZ
+        end
+      end
+    end
+  end
+  for i = 1, TEXT_SLOTS do
+    local item = frame.items[i]
+    if item and item.active then
+      local offset = split and item.isPet and item.petOffsetX or 0
+      local offsetY = split and item.isPet and item.petOffsetY or 0
+      local reference = item.layoutX and UIParent or frame
+      if item.renderReference ~= reference or item.renderAnchor ~= anchor then item.text:ClearAllPoints() end
+      if item.layoutX then
+        local x, y = item.layoutX + offset, item.layoutY + offsetY
+        item.text:SetPoint(anchor, UIParent, "BOTTOMLEFT", x, y)
+      else
+        item.text:SetPoint(anchor, frame, anchor, offset / scale, (item.displayPosition or item.position) + offsetY / scale)
+      end
+      item.renderReference, item.renderAnchor = reference, anchor
+      SetTextPerspective(item, item.perspectiveWarp or 0)
+      if item.pendingRender then item.text:Show(); item.pendingRender = nil end
     end
   end
   if not anyActive then
@@ -1203,6 +1601,19 @@ function Z.PulseDummyDamage(bases)
       elseif i == 5 then animationEvent.IsParried = true end
       if MikSBT.PrepareExternalAnimationEvent(animationEvent) then
         AddAnimation(record, animationEvent)
+      end
+      if Z.config.split_pet == "1" then
+        local petSettings = profile.EventSettings.MSBT_EVENTTYPE_OUTGOING_PET_DAMAGE or settings
+        local petEvent = {
+          ScrollArea = { DisplaySettings = profile.DisplaySettings.PetOutgoing or display },
+          EventType = "MSBT_EVENTTYPE_OUTGOING_PET_DAMAGE",
+          EventSettings = petSettings,
+          UnformattedText = petSettings.Message,
+          Amount = tostring(40 + i * 17 + math.mod(dummyPulse * 11, 51)),
+          Name = record.name or "Dummy",
+          Texture = "Interface\\Icons\\Ability_Druid_FerociousBite",
+        }
+        if MikSBT.PrepareExternalAnimationEvent(petEvent) then AddAnimation(record, petEvent) end
       end
     end
   end
@@ -1285,21 +1696,22 @@ eventFrame:SetScript("OnEvent", function()
     return
   elseif event == "SPELLS_CHANGED" or event == "LEARNED_SPELL_IN_TAB"
       or event == "PET_BAR_UPDATE" or event == "UNIT_PET" then
+    petScreenSample.time = nil
     sourceSpellIcons = {}
     sourceSpellbookScanned = nil
     return
   elseif event == "AUTO_ATTACK_SELF" then
     QueueGuidHint(arg2, arg3 and arg3 > 0 and arg3 or nil, nil)
   elseif event == "AUTO_ATTACK_OTHER" then
-    if arg1 == UnitGUID("pet") then QueueGuidHint(arg2, arg3 and arg3 > 0 and arg3 or nil, nil) end
+    if arg1 == UnitGUID("pet") then QueueGuidHint(arg2, arg3 and arg3 > 0 and arg3 or nil, nil, true) end
   elseif event == "SPELL_DAMAGE_EVENT_SELF" then
     QueueGuidHint(arg1, arg4, arg3)
   elseif event == "SPELL_DAMAGE_EVENT_OTHER" then
-    if arg2 == UnitGUID("pet") then QueueGuidHint(arg1, arg4, arg3) end
+    if arg2 == UnitGUID("pet") then QueueGuidHint(arg1, arg4, arg3, true) end
   elseif event == "SPELL_MISS_SELF" then
     QueueGuidHint(arg2, nil, arg3)
   elseif event == "SPELL_MISS_OTHER" then
-    if arg1 == UnitGUID("pet") then QueueGuidHint(arg2, nil, arg3) end
+    if arg1 == UnitGUID("pet") then QueueGuidHint(arg2, nil, arg3, true) end
   end
 end)
 

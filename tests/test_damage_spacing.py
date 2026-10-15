@@ -9,6 +9,7 @@ lua.compile(source,name="zDNumbers.lua")
 helper=source[source.index("local function ResolveAnimationSpacing("):source.index("local function UpdateAnimations(")]
 lua.execute('''
 TEXT_SLOTS=10
+Z={config={split_pet="0"}}
 RetireAnimationItem=function(item) item.active=nil end
 function item(y,h,order)
   return {active=true,position=y,fontSize=h,stackOffset=0,displayPosition=y,spawnSequence=order,

@@ -1,4 +1,4 @@
-﻿-------------------------------------------------------------------------------------
+-------------------------------------------------------------------------------------
 -- Title: Mik's Scrolling Battle Text
 -- Author: Mik
 -- Maintainer: Athene
@@ -123,6 +123,15 @@ NO_ICON_CACHE = {}
 
 -- Babble-Spell pour les icones des spells de classe
 local BS = AceLibrary("Babble-Spell-2.2")
+
+-- Optional narrow timing; inactive OctoPerf makes no records or clock reads.
+local function BeginMSBTMeasurement()
+ local perf = OctoPerf;
+ if perf and perf.recording and perf.BeginOperation then
+  local started, generation = perf.BeginOperation();
+  return perf, started, generation, event;
+ end
+end
 
 -- Number of font strings.
 local NUM_FONT_STRINGS = 20;
@@ -308,11 +317,19 @@ function MikSBT.OnUpdate()
 
    -- Merge like events.
    local numEvents = table.getn(mergeData.UnmergedEvents);
-   MikSBT.MergeEvents(mergeData, numEvents);
+   local perf, started, generation, trigger;
+   if numEvents > 0 then
+    perf, started, generation, trigger = BeginMSBTMeasurement();
+    MikSBT.MergeEvents(mergeData, numEvents);
+    if started then perf.EndOperation("MSBT event merging", started, generation, nil, trigger); end
+   end
 
    -- Add the merged animation events to the animation system.
    for _, animationEvent in mergeData.MergedEvents do
-    if (not MikSBT.RouteOutgoingNameplateEvent(animationEvent)) then
+    perf, started, generation, trigger = BeginMSBTMeasurement();
+    local routed = MikSBT.RouteOutgoingNameplateEvent(animationEvent);
+    if started then perf.EndOperation("MSBT outgoing routing", started, generation, animationEvent.EffectName, trigger); end
+    if (not routed) then
      MikSBT.AddAnimation(animationEvent);
     end
    end
@@ -320,8 +337,9 @@ function MikSBT.OnUpdate()
    -- Clear the merged animation events array.
    local numMergedEvents = table.getn(mergeData.MergedEvents);
    for i = numMergedEvents, 1, -1 do
-    table.remove(mergeData.MergedEvents, i);
+    mergeData.MergedEvents[i] = nil;
    end
+   table.setn(mergeData.MergedEvents, 0);
 
 
    -- Reset the last merged time.
@@ -338,9 +356,10 @@ end
 -- Called when the mod's animation frames are updated.
 -- **********************************************************************************
 function MikSBT.OnUpdateAnimationFrame(frame)
- local scrollArea;
+ local scrollArea = frame.msbtScrollArea;
 
  -- Get the frame's name.
+ if not scrollArea then
  local frameName = frame:GetName();
  if (frameName == scrollAreas.Incoming.AssociatedFrame) then
   scrollArea = scrollAreas.Incoming;
@@ -353,16 +372,20 @@ function MikSBT.OnUpdateAnimationFrame(frame)
  elseif (frameName == scrollAreas.Notification.AssociatedFrame) then
   scrollArea = scrollAreas.Notification;
  end
+  frame.msbtScrollArea = scrollArea;
+ end
 
  -- Flag for whether or not all the animations are inactive.
  local allInactive = true;
+ local currentTime;
 
  -- Loop through all possible animation display objects for the scroll area.
  for _, animDisplayInfo in scrollArea.AnimationDisplayArray do
   -- Check if the animation is active.
   if (animDisplayInfo.IsActive) then
    -- Do the animation and clear the all inactive flag.
-   MikSBT.DoAnimation(animDisplayInfo, scrollArea);
+   if not currentTime then currentTime = GetTime(); end
+   MikSBT.DoAnimation(animDisplayInfo, scrollArea, currentTime);
    allInactive = false;
   end
  end
@@ -465,6 +488,7 @@ function MikSBT.SetupAnimationScrollAreas()
 
  -- Loop through the scroll areas.
  for _, scrollArea in scrollAreas do
+  getglobal(scrollArea.AssociatedFrame).msbtScrollArea = scrollArea;
   -- Initialize the next available animation display object.
   scrollArea.NextAnimationDisplay = 1;
 
@@ -781,15 +805,19 @@ function MikSBT.MergeEvents(mergeData, numEvents)
    if (mergeData.IsOutgoing and MikSBT.IsOutgoingNameplateHandlerActive()) then
     MikSBT.ResolveOutgoingNameplateTarget(mergeData.UnmergedEvents[x]);
    end
+    -- No callbacks run inside the candidate scan. Evaluate the integration
+    -- state after target resolution, once per source event rather than once
+    -- for every possible merged destination.
+    local nameplateActive = mergeData.IsOutgoing and table.getn(mergeData.MergedEvents) > 0
+      and MikSBT.IsOutgoingNameplateHandlerActive();
+    local nameplateEvent = nameplateActive and MikSBT.IsOutgoingNameplateEvent(mergeData.UnmergedEvents[x]);
  
    -- Loop through all of the events in the merged events array.
    for _, animationEvent in mergeData.MergedEvents do
      local unmergedEventMatched = false;
  
      -- Check if the event types match and the effect names are the same.
-    local sameNameplateTarget = (not mergeData.IsOutgoing) or
-      (not MikSBT.IsOutgoingNameplateHandlerActive()) or
-      (not MikSBT.IsOutgoingNameplateEvent(mergeData.UnmergedEvents[x])) or
+    local sameNameplateTarget = (not nameplateActive) or (not nameplateEvent) or
       (mergeData.UnmergedEvents[x].TargetGUID ~= nil and animationEvent.TargetGUID ~= nil and
        mergeData.UnmergedEvents[x].TargetGUID == animationEvent.TargetGUID);
     if ((mergeData.UnmergedEvents[x].EventType == animationEvent.EventType) and
@@ -816,8 +844,7 @@ function MikSBT.MergeEvents(mergeData, numEvents)
      -- There is an effect name.
      else
       -- Check if there is a name and replace it with the multiple targets string.
-      if (animationEvent.Name ~= nil and not (mergeData.IsOutgoing and
-          MikSBT.IsOutgoingNameplateHandlerActive() and MikSBT.IsOutgoingNameplateEvent(animationEvent))) then
+      if (animationEvent.Name ~= nil and not (nameplateActive and MikSBT.IsOutgoingNameplateEvent(animationEvent))) then
        animationEvent.Name = MikSBT.MSG_MULTIPLE_TARGETS;
       end
  
@@ -910,17 +937,23 @@ function MikSBT.MergeEvents(mergeData, numEvents)
  end
 
 
- -- Remove the processed animation events from unmerged events queue.
+ -- Return consumed records, then compact once. Repeated removal at index one
+ -- shifted the whole queue for every hit. Events appended during resolution
+ -- remain queued, in the same order, for the next merge.
+ local queue = mergeData.UnmergedEvents;
  for x = 1, numEvents do
   -- Check if the event was merged into a different animation event.
-  if (mergeData.UnmergedEvents[1].EventMerged) then
+  if (queue[x].EventMerged) then
    -- Reclaim the animation event table to the events recycler.
-   eventsRecycler:ReclaimTable(mergeData.UnmergedEvents[1]);
+   eventsRecycler:ReclaimTable(queue[x]);
   end
 
-  -- Remove the event from the unmerged events array.
-  table.remove(mergeData.UnmergedEvents, 1);
  end
+ local total = table.getn(queue);
+ local remaining = total - numEvents;
+ for x = 1, remaining do queue[x] = queue[x + numEvents]; end
+ for x = total, remaining + 1, -1 do queue[x] = nil; end
+ table.setn(queue, remaining);
 end
 
 
@@ -1702,6 +1735,9 @@ function MikSBT.DispatchAnimationEvent(animationEvent)
   else
    MikSBT.AddAnimation(animationEvent);
   end
+ else
+  -- Hidden events are still owned by this dispatcher, just like suppressions.
+  eventsRecycler:ReclaimTable(animationEvent);
  end
 end
 
@@ -1746,11 +1782,21 @@ function MikSBT.ResolveEffectIcon(effectName, explicitTexture, spellID)
 end
 
 -- **********************************************************************************
+function MikSBT.PlayAlertSound(path)
+ local perf, started, generation, trigger = BeginMSBTMeasurement();
+ local result = PlaySoundFile(path);
+ if started then perf.EndOperation("MSBT alert sound", started, generation, path, trigger); end
+ return result;
+end
+
+-- **********************************************************************************
 -- Add the event to the appropriate scroll area's animation display array.
 -- **********************************************************************************
 function MikSBT.AddAnimation(animationEvent)
+ local perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Format the animation event's output text.
  MikSBT.FormatEventText(animationEvent);
+ if started then perf.EndOperation("MSBT text formatting", started, generation, animationEvent.Text, trigger); end
 
  -- Loop through all of the suppression entries and look for a match.
  for _, suppressionSettings in MikSBT.CurrentProfile.Suppressions do
@@ -1767,6 +1813,7 @@ function MikSBT.AddAnimation(animationEvent)
  end
  
  if animationEvent.EventType == "MSBT_EVENTTYPE_NOTIFICATION_POWER_GAIN" and animationEvent.EffectName ~= 0 and MikSBT.CurrentProfile.ShowAllManaGains then
+  eventsRecycler:ReclaimTable(animationEvent);
 	return
  end
 
@@ -1856,13 +1903,14 @@ function MikSBT.AddAnimation(animationEvent)
   if MikSBT.CurrentProfile.ResistSound then
     if animationEvent.EffectName then
       if (string.find(animationEvent.EffectName, "Cone of Cold") or string.find(animationEvent.EffectName, "Frost Nova")) then
-        PlaySoundFile("Interface\\AddOns\\z_DNumbers\\MikScrollingBattleText\\sounds\\Resist.mp3");
+        MikSBT.PlayAlertSound("Interface\\AddOns\\z_DNumbers\\MikScrollingBattleText\\sounds\\Resist.mp3");
       end
     end
   end
  end
   
  -- Set the font object properties.
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  animDisplayInfo.FontObject:ClearAllPoints();
  -- SetTextHeight does NOT apply if the original font size wouldn't be changed by it
  -- FontSize tops out at 32 and in vanilla doesn't seem to apply at all - every different size I've tried has refused to work
@@ -1873,11 +1921,23 @@ function MikSBT.AddAnimation(animationEvent)
  animDisplayInfo.FontObject:SetTextHeight(animDisplayInfo.FontSize);
  animDisplayInfo.FontObject:SetAlpha(animDisplayInfo.Alpha);
  animDisplayInfo.FontObject:SetPoint(animDisplayInfo.AnchorPoint, animDisplayInfo.PositionX, animDisplayInfo.PositionY);
+ -- AddAnimation deliberately keeps the vanilla SetFont/SetTextHeight sequence.
+ -- Seed only values just applied, so animation ticks can skip identical writes.
+ animDisplayInfo.appliedTextHeight, animDisplayInfo.heightFont = animDisplayInfo.FontSize, animDisplayInfo.FontObject;
+ animDisplayInfo.appliedAlpha, animDisplayInfo.alphaFont = animDisplayInfo.Alpha, animDisplayInfo.FontObject;
+ animDisplayInfo.appliedAnchor, animDisplayInfo.appliedX, animDisplayInfo.appliedY = animDisplayInfo.AnchorPoint, animDisplayInfo.PositionX, animDisplayInfo.PositionY;
+ animDisplayInfo.pointFont = animDisplayInfo.FontObject;
+ animDisplayInfo.appliedTextureAlpha, animDisplayInfo.alphaTexture = nil, nil;
+ animDisplayInfo.appliedTextureHeight, animDisplayInfo.heightTexture = nil, nil;
+ if started then perf.EndOperation("MSBT font/text rendering", started, generation, animationEvent.Text, trigger); end
  
  -- Athene Edit - Spell Icon
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  local texture = MikSBT.ResolveEffectIcon(animationEvent.EffectName, animationEvent.Texture,
    animationEvent.SpellID or animationEvent.SpellId or animationEvent.spellId);
+ if started then perf.EndOperation("MSBT icon lookup", started, generation, animationEvent.EffectName or animationEvent.Text, trigger); end
  
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  if texture then
   -- local frame
   if not animDisplayInfo.Texture then
@@ -1890,12 +1950,14 @@ function MikSBT.AddAnimation(animationEvent)
   animDisplayInfo.Texture:SetTexture(texture);
   animDisplayInfo.Texture:SetWidth(animDisplayInfo.FontSize);
   animDisplayInfo.Texture:SetHeight(animDisplayInfo.FontSize);
+  animDisplayInfo.appliedTextureHeight, animDisplayInfo.heightTexture = animDisplayInfo.FontSize, animDisplayInfo.Texture;
   animDisplayInfo.Texture:SetTexCoord(0.125, 0.875, 0.125, 0.875)
   animDisplayInfo.Texture:SetPoint("RIGHT", animDisplayInfo.FontObject, "LEFT", -4, 0);
   animDisplayInfo.Texture:SetDrawLayer(animDisplayInfo.IsSticky and "OVERLAY" or animDisplayInfo.IsCrit and "OVERLAY" or "ARTWORK");
  elseif animDisplayInfo.Texture then
 	animDisplayInfo.Texture:SetTexture(nil);
  end
+ if started then perf.EndOperation("MSBT icon rendering", started, generation, texture or animationEvent.Text, trigger); end
  
 
  -- Set the last update to the current time.
@@ -1912,6 +1974,7 @@ function MikSBT.AddAnimation(animationEvent)
   getglobal(animationEvent.ScrollArea.AssociatedFrame):Show();
  end
 
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Check if it's a sticky or a crit and sticky crits are enabled.
  if (animDisplayInfo.IsSticky or (animDisplayInfo.IsCrit and MikSBT.CurrentProfile.UseStickyCrits)) then
   -- Make sure the stickies don't overlap.
@@ -1920,6 +1983,7 @@ function MikSBT.AddAnimation(animationEvent)
   -- Make sure there are no overlaps in the scrolling text.
   MikSBT.RepositionAnimDisplayInfo(animationEvent.ScrollArea);
  end
+ if started then perf.EndOperation("MSBT animation placement", started, generation, animationEvent.Text, trigger); end
 
  -- Reclaim the animation event table to the events recycler.
  eventsRecycler:ReclaimTable(animationEvent);
@@ -1947,7 +2011,8 @@ function MikSBT.FindItemIcon(item)
 	end
 	local count, bag, slot, texture;
 	for i = 0,NUM_BAG_FRAMES do
-		for j = 1,MAX_CONTAINER_ITEMS do
+		local slots = GetContainerNumSlots and GetContainerNumSlots(i) or MAX_CONTAINER_ITEMS;
+		for j = 1,slots do
 			link = GetContainerItemLink(i,j);
 			if ( link ) then
 				if ( item == string.lower(ItemLinkToName(link))) then
@@ -2333,8 +2398,9 @@ function MikSBT.RepositionAnimDisplayInfo(scrollArea)
 
  -- Clear the temp non stickies table.
  for x = 1, numNonStickies do
-  table.remove(activeNonStickies, 1);
+  activeNonStickies[x] = nil;
  end
+ table.setn(activeNonStickies, 0);
 end
 
 
@@ -2415,42 +2481,67 @@ function MikSBT.RepositionStickyAnimDisplayInfo(scrollArea)
 
  -- Clear the temp stickies table.
  for x = 1, numStickies do
-  table.remove(activeStickies, 1);
+  activeStickies[x] = nil;
  end
+ table.setn(activeStickies, 0);
 end
 
 
 -- **********************************************************************************
 -- Animates the passed animation display data.
 -- **********************************************************************************
-function MikSBT.DoAnimation(animDisplayInfo, scrollArea)
+local function SetAnimationHeight(info, height)
+ if info.heightFont ~= info.FontObject or info.appliedTextHeight ~= height then
+  info.FontObject:SetTextHeight(height);
+  info.heightFont, info.appliedTextHeight = info.FontObject, height;
+ end
+ local texture = info.Texture;
+ if texture and (info.heightTexture ~= texture or info.appliedTextureHeight ~= height) then
+  texture:SetWidth(height); texture:SetHeight(height);
+  info.heightTexture, info.appliedTextureHeight = texture, height;
+ end
+end
+
+local function SetAnimationAlpha(info, alpha)
+ if info.alphaFont ~= info.FontObject or info.appliedAlpha ~= alpha then
+  info.FontObject:SetAlpha(alpha);
+  info.alphaFont, info.appliedAlpha = info.FontObject, alpha;
+ end
+ local texture = info.Texture;
+ if texture and (info.alphaTexture ~= texture or info.appliedTextureAlpha ~= alpha) then
+  texture:SetAlpha(alpha);
+  info.alphaTexture, info.appliedTextureAlpha = texture, alpha;
+ end
+end
+
+local function SetAnimationPoint(info)
+ if info.pointFont ~= info.FontObject or info.appliedAnchor ~= info.AnchorPoint
+   or info.appliedX ~= info.PositionX or info.appliedY ~= info.PositionY then
+  info.FontObject:SetPoint(info.AnchorPoint, info.PositionX, info.PositionY);
+  info.pointFont, info.appliedAnchor = info.FontObject, info.AnchorPoint;
+  info.appliedX, info.appliedY = info.PositionX, info.PositionY;
+ end
+end
+
+function MikSBT.DoAnimation(animDisplayInfo, scrollArea, currentTime)
 
  -- Get the current and elapsed times since the last update.
- local currentTime = GetTime();
+ currentTime = currentTime or GetTime();
  local elapsedTime = currentTime - animDisplayInfo.LastUpdated;
  local stickyDisplayTime = MikSBT.CurrentProfile.FadeDelay or STICKY_DISPLAY_TIME;
 
  -- Check if it's a sticky or a crit and sticky crits are enabled.
  if (animDisplayInfo.IsSticky or (animDisplayInfo.IsCrit and MikSBT.CurrentProfile.UseStickyCrits)) then
   -- Move the sticky in case it was repositioned.
-  animDisplayInfo.FontObject:SetPoint(animDisplayInfo.AnchorPoint, animDisplayInfo.PositionX, animDisplayInfo.PositionY);
+  SetAnimationPoint(animDisplayInfo);
 
   if (elapsedTime <= STICKY_FADE_IN_TIME) then
    local textDelta = animDisplayInfo.FontSize * (1 - (elapsedTime / STICKY_FADE_IN_TIME));
-   animDisplayInfo.FontObject:SetTextHeight(animDisplayInfo.FontSize + textDelta);
-   animDisplayInfo.FontObject:SetAlpha(1);
-   if animDisplayInfo.Texture then
-	animDisplayInfo.Texture:SetAlpha(1);
-	animDisplayInfo.Texture:SetWidth(animDisplayInfo.FontSize + textDelta);
-    animDisplayInfo.Texture:SetHeight(animDisplayInfo.FontSize + textDelta);
-  end
+   SetAnimationHeight(animDisplayInfo, animDisplayInfo.FontSize + textDelta);
+   SetAnimationAlpha(animDisplayInfo, 1);
    return;
   elseif (elapsedTime <= (stickyDisplayTime + STICKY_FADE_IN_TIME)) then
-   animDisplayInfo.FontObject:SetTextHeight(animDisplayInfo.FontSize);
-   if animDisplayInfo.Texture then
-	animDisplayInfo.Texture:SetWidth(animDisplayInfo.FontSize);
-    animDisplayInfo.Texture:SetHeight(animDisplayInfo.FontSize);
-  end
+   SetAnimationHeight(animDisplayInfo, animDisplayInfo.FontSize);
      if animDisplayInfo.IsCrit then
 	  if not animDisplayInfo.timeLastJiggled then
 			animDisplayInfo.originalPositionX = animDisplayInfo.PositionX
@@ -2469,25 +2560,19 @@ function MikSBT.DoAnimation(animDisplayInfo, scrollArea)
 	   animDisplayInfo.PositionX = animDisplayInfo.originalPositionX + animDisplayInfo.DecalageX;
 	   animDisplayInfo.PositionY = animDisplayInfo.originalPositionY + animDisplayInfo.DecalageY;
 	   animDisplayInfo.timeLastJiggled = elapsedTime;
-	   animDisplayInfo.FontObject:SetPoint(animDisplayInfo.AnchorPoint, animDisplayInfo.PositionX, animDisplayInfo.PositionY);
+	   SetAnimationPoint(animDisplayInfo);
 	  end
   end
    return;
   elseif (elapsedTime <= (stickyDisplayTime + STICKY_FADE_IN_TIME + STICKY_FADE_OUT_TIME)) then
    local alpha = 1 - ((elapsedTime - stickyDisplayTime - STICKY_FADE_IN_TIME) / STICKY_FADE_OUT_TIME);
    animDisplayInfo.timeLastJiggled = nil
-   animDisplayInfo.FontObject:SetAlpha(alpha);
-   if animDisplayInfo.Texture then
-	animDisplayInfo.Texture:SetAlpha(alpha);
-  end
+   SetAnimationAlpha(animDisplayInfo, alpha);
    return;
   end
 
   -- Deactivate the animation.
-  animDisplayInfo.FontObject:SetAlpha(0);
-  if animDisplayInfo.Texture then
-	animDisplayInfo.Texture:SetAlpha(0);
-  end
+  SetAnimationAlpha(animDisplayInfo, 0);
   animDisplayInfo.IsActive = false;
 
   return;
@@ -2502,26 +2587,20 @@ function MikSBT.DoAnimation(animDisplayInfo, scrollArea)
   animDisplayInfo.AnimationStep = textSpeed * elapsedTime;
 
   -- Scroll the text and set its alpha appropriately.
-  local animationComplete = animDisplayInfo.ScrollFunction(animDisplayInfo, scrollArea);
+  local animationComplete = animDisplayInfo.ScrollFunction(animDisplayInfo, scrollArea, currentTime);
 
 
   -- Check if the animation is complete.
   if (animationComplete) then
    -- Set the font object's alpha.
-   animDisplayInfo.FontObject:SetAlpha(0);
-   if animDisplayInfo.Texture then
-	animDisplayInfo.Texture:SetAlpha(0);
-   end
+   SetAnimationAlpha(animDisplayInfo, 0);
 
    -- Deactive the animation.
    animDisplayInfo.IsActive = false;
   else
    -- Move the font object and set its alpha.
-   animDisplayInfo.FontObject:SetPoint(animDisplayInfo.AnchorPoint, animDisplayInfo.PositionX, animDisplayInfo.PositionY);
-   animDisplayInfo.FontObject:SetAlpha(animDisplayInfo.Alpha);
-   if animDisplayInfo.Texture then
-	animDisplayInfo.Texture:SetAlpha(animDisplayInfo.Alpha);
-   end
+   SetAnimationPoint(animDisplayInfo);
+   SetAnimationAlpha(animDisplayInfo, animDisplayInfo.Alpha);
   end
 
   -- Set the last update to the current time.
@@ -2534,10 +2613,10 @@ end
 -- Moves the passed animation display info upward and fades the alpha correctly.
 -- Returns true when the animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollUp(animDisplayInfo, scrollArea)
+function MikSBT.ScrollUp(animDisplayInfo, scrollArea, currentTime)
  -- Increment the Y position by the step.
  animDisplayInfo.PositionY = animDisplayInfo.PositionY + animDisplayInfo.AnimationStep;
- MikSBT.UpdateScrollingAlpha(animDisplayInfo, scrollArea);
+ MikSBT.UpdateScrollingAlpha(animDisplayInfo, scrollArea, currentTime);
 
  -- Check if the animation is complete.
  if (animDisplayInfo.PositionY >= scrollArea.DisplaySettings.ScrollHeight) then
@@ -2554,10 +2633,10 @@ end
 -- Moves the passed animation display info downward and fades the alpha correctly.
 -- Returns true when the animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollDown(animDisplayInfo, scrollArea)
+function MikSBT.ScrollDown(animDisplayInfo, scrollArea, currentTime)
  -- Decrement the Y position by the step.
  animDisplayInfo.PositionY = animDisplayInfo.PositionY - animDisplayInfo.AnimationStep;
- MikSBT.UpdateScrollingAlpha(animDisplayInfo, scrollArea);
+ MikSBT.UpdateScrollingAlpha(animDisplayInfo, scrollArea, currentTime);
 
  -- Check if the animation is complete.
  if (animDisplayInfo.PositionY <= 0) then
@@ -2574,8 +2653,8 @@ end
 -- Sets alpha using elapsed time.  FadeDelay controls how long text remains fully
 -- opaque; it then fades over the remaining travel time.
 -- **********************************************************************************
-function MikSBT.UpdateScrollingAlpha(animDisplayInfo, scrollArea)
- local elapsed = GetTime() - animDisplayInfo.StartTime;
+function MikSBT.UpdateScrollingAlpha(animDisplayInfo, scrollArea, currentTime)
+ local elapsed = (currentTime or GetTime()) - animDisplayInfo.StartTime;
  local fadeDelay = MikSBT.CurrentProfile.FadeDelay or 0;
  local textSpeed = MikSBT.CurrentProfile.TextSpeed or MikSBT.DEFAULT_CONFIG.TextSpeed;
  local travelTime = scrollArea.DisplaySettings.ScrollHeight / textSpeed;
@@ -2598,9 +2677,9 @@ end
 -- Moves the passed animation display info straight up. Returns true when the
 -- animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollStraightUp(animDisplayInfo, scrollArea)
+function MikSBT.ScrollStraightUp(animDisplayInfo, scrollArea, currentTime)
  -- Returns the result of the scroll up function.
- return MikSBT.ScrollUp(animDisplayInfo, scrollArea);
+ return MikSBT.ScrollUp(animDisplayInfo, scrollArea, currentTime);
 end
 
 
@@ -2608,9 +2687,9 @@ end
 -- Moves the passed animation display info straight down.  Returns true when the
 -- animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollStraightDown(animDisplayInfo, scrollArea)
+function MikSBT.ScrollStraightDown(animDisplayInfo, scrollArea, currentTime)
  -- Returns the result of the scroll down function.
- return MikSBT.ScrollDown(animDisplayInfo, scrollArea);
+ return MikSBT.ScrollDown(animDisplayInfo, scrollArea, currentTime);
 end
 
 
@@ -2618,9 +2697,9 @@ end
 -- Moves the passed animation display info in a left parabolic shape going upwards.
 -- Returns true when the animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollLeftParabolaUp(animDisplayInfo, scrollArea)
+function MikSBT.ScrollLeftParabolaUp(animDisplayInfo, scrollArea, currentTime)
  -- Scroll the animation display info straight up and set the alpha correctly.
- local animationComplete = MikSBT.ScrollUp(animDisplayInfo, scrollArea);
+ local animationComplete = MikSBT.ScrollUp(animDisplayInfo, scrollArea, currentTime);
 
  -- Calculate the animation midpoint.
  local animationMidPoint = scrollArea.DisplaySettings.ScrollHeight / 2;
@@ -2643,9 +2722,9 @@ end
 -- Moves the passed animation display info in a left parabolic shape going downwards.
 -- Returns true when the animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollLeftParabolaDown(animDisplayInfo, scrollArea)
+function MikSBT.ScrollLeftParabolaDown(animDisplayInfo, scrollArea, currentTime)
  -- Scroll the animation display info straight up and set the alpha correctly.
- local animationComplete = MikSBT.ScrollDown(animDisplayInfo, scrollArea);
+ local animationComplete = MikSBT.ScrollDown(animDisplayInfo, scrollArea, currentTime);
 
  -- Calculate the animation midpoint.
  local animationMidPoint = scrollArea.DisplaySettings.ScrollHeight / 2;
@@ -2668,9 +2747,9 @@ end
 -- Moves the passed animation display info in a right parabolic shape going upwards.
 -- Returns true when the animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollRightParabolaUp(animDisplayInfo, scrollArea)
+function MikSBT.ScrollRightParabolaUp(animDisplayInfo, scrollArea, currentTime)
  -- Scroll the animation display info straight up and set the alpha correctly.
- local animationComplete = MikSBT.ScrollUp(animDisplayInfo, scrollArea);
+ local animationComplete = MikSBT.ScrollUp(animDisplayInfo, scrollArea, currentTime);
 
  -- Calculate the animation midpoint.
  local animationMidPoint = scrollArea.DisplaySettings.ScrollHeight / 2;
@@ -2693,9 +2772,9 @@ end
 -- Moves the passed animation display info in a right parabolic shape going downwards.
 -- Returns true when the animation is complete.
 -- **********************************************************************************
-function MikSBT.ScrollRightParabolaDown(animDisplayInfo, scrollArea)
+function MikSBT.ScrollRightParabolaDown(animDisplayInfo, scrollArea, currentTime)
  -- Scroll the animation display info straight up and set the alpha correctly.
- local animationComplete = MikSBT.ScrollDown(animDisplayInfo, scrollArea);
+ local animationComplete = MikSBT.ScrollDown(animDisplayInfo, scrollArea, currentTime);
 
  -- Calculate the animation midpoint.
  local animationMidPoint = scrollArea.DisplaySettings.ScrollHeight / 2;

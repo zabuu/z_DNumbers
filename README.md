@@ -13,6 +13,30 @@ nameplate replacement without addon-specific integration.
 
 - `/zdn` or `/zdnumbers` opens attachment, placement, alignment, and fade settings.
 - `/msbt` opens the embedded MSBT font, color, event, text, speed, and profile settings.
+- In `/zdn`, enable **Split pet damage into a separate stream**. It is off
+  by default, preserving the combined stream. Position is automatic: pet numbers
+  orbit the main stream's starting point on a horizontal world plane, turning
+  through 360 degrees toward your pet's X/Y position. Both streams start at the
+  same world elevation; uphill/downhill pets do not tilt the ring. The camera
+  projects this level ring into perspective, and numbers continue rising from
+  their respective starting points with readable, camera-facing text.
+  Each nameplate gets separate ten-number player/pet pools. Position is resolved
+  per number against nearby text, crits and icons. A wide crit only displaces the
+  pet hits beside that row, rather than pushing the entire pet stack away.
+  When the pet-facing direction lines up vertically with the regular stream
+  (behind/in front of the target), player and pet slots weave in an alternating
+  zipper, retaining order within each source. Side-facing streams retain their
+  independent vertical spacing. Pet hits fit into individual gaps, with a
+  two-pixel clearance plus outline allowance; unused scroll-area width is ignored.
+  World yaw and each number's gap closure are smoothed, with a small center dead zone to avoid
+  jitter. One pet X/Y lookup per frame is shared across all streams; one level
+  projection per active nameplate supplies the ring's perspective for every
+  pet number. The existing zAPI is used; no DLL update is needed. Without world
+  coordinates, a visible pet plate supplies a level left/right fallback.
+  If neither is available, retain the last direction
+  (right for a new stream or pet-less dummy preview). MSBT's pet fonts, colors,
+  filters and event formatting still apply. zNameplates' **Dummy Damage!** also
+  pulses the pet lane while splitting is enabled, even without a real pet.
 - Disable separate `MikScrollingBattleText` and `MikScrollingBattleTextOptions`
   addons while using zDNumbers; they are already included.
 
@@ -49,15 +73,43 @@ would put them there.
 
 ## Performance
 
+The embedded MSBT parser reuses its capture-order layouts and avoids iterator
+allocation for ordinary first-match searches. Burst queues compact once after
+merging, preserving late arrivals and the existing target, pet, crit and result
+rules. Empty merge ticks skip processing. Hidden/suppressed event records return
+to the recycler, whose weak overflow handles gaps left by collection.
+
+Scroll areas share one clock sample per animation frame. Sticky holds and
+unchanged font/icon geometry, opacity and anchor positions skip redundant UI
+writes; motion, fade curves, crit jitter, display timing and the vanilla font
+size workaround are preserved. Item-icon searches probe actual bag capacity,
+with the original fallback when slot counts are unavailable. Identical health
+or mana alert sounds play once per resource update while retaining all text
+notifications.
+
+`tests/test_msbt_optimization.py` compares parsing, merging and 18 animation
+scenarios against a bundled pre-optimization baseline. Its work-count and
+allocation comparisons are controlled Lua checks, not in-game FPS estimates.
+OctoPerf also has optional internal MSBT timings to
+separate warning audio, fonts/icons, merging and outgoing routing when a hitch
+is recorded. Those spans remain passive while recording is off.
+
 Text/icon slots are allocated only when a number needs them and reused later;
 idle nameplates do not run animation tracking. Numbers on the same unit share
 one base projection per rendered frame, while each elevated point still gets
 its own live camera projection. Frozen/dead anchors use remembered world points
 without repeatedly resolving an expired unit.
+Split pet streams reuse those projections: a single horizontal probe supplies
+the perspective translation. Each pet number finds its nearest free gap along
+that direction using reusable, bounded collision intervals for individual
+numbers. There are no scene scans, per-number pet lookups or repeated native
+projections to fit the ring. Zipper ordering also uses reused slot arrays.
 
 Rounded-icon geometry, font height, perspective setup, alignment and opacity
 are changed only when needed. Motion and fades still update every rendered
 frame. Modern nameplate enumeration avoids duplicate attachments; legacy/mixed
 hosts retain periodic recovery and immediate recovery on an unmatched damage
-batch. MSBT formatting, merging, ten-slot capacity, depth and profiles remain
-unchanged.
+batch. MSBT formatting, merging, depth and profiles remain unchanged. The default
+combined stream retains ten slots; split mode allows ten per source, allocated
+only when used. Player/pet GUID hints are source-matched so equal simultaneous
+hits cannot steal each other's target.

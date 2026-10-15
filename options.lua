@@ -2,7 +2,7 @@ local Z = zDNumbers
 
 local frame = CreateFrame("Frame", "zDNumbersOptions", UIParent)
 frame:SetWidth(500)
-frame:SetHeight(550)
+frame:SetHeight(615)
 frame:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
 frame:SetFrameStrata("DIALOG")
 frame:SetMovable(true)
@@ -47,16 +47,31 @@ Label("Attach outgoing MSBT damage to nameplates", -82)
 enabled:SetScript("OnClick", function() SetValue("enabled", this:GetChecked() and "1" or "0") end)
 controls.enabled = enabled
 
+local splitPet = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+splitPet:SetPoint("TOPLEFT", frame, "TOPLEFT", 35, -112)
+splitPet:SetWidth(24); splitPet:SetHeight(24)
+local splitLabel = Label("Split pet damage into a separate stream", -115)
+splitLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 65, -115)
+splitLabel:SetWidth(360)
+splitPet:SetScript("OnClick", function() SetValue("split_pet", this:GetChecked() and "1" or "0") end)
+controls.splitPet = splitPet
+
+local petDirectionHint = Label("Position: level orbit toward your pet (automatic)", -148)
+petDirectionHint:SetPoint("TOPLEFT", frame, "TOPLEFT", 65, -148)
+petDirectionHint:SetWidth(360)
+petDirectionHint:SetTextColor(.7, .75, .8)
+controls.petDirectionHint = petDirectionHint
+
 local icons = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-icons:SetPoint("TOPLEFT", frame, "TOPLEFT", 35, -112)
+icons:SetPoint("TOPLEFT", frame, "TOPLEFT", 35, -180)
 icons:SetWidth(24); icons:SetHeight(24)
-Label("Show subtle spell and attack source icons", -112)
+Label("Show subtle spell and attack source icons", -180)
 icons:SetScript("OnClick", function() SetValue("icons", this:GetChecked() and "1" or "0") end)
 controls.icons = icons
 
-local opacityLabel = Label("Icon opacity: 30%", -152)
+local opacityLabel = Label("Icon opacity: 30%", -217)
 local opacity = CreateFrame("Slider", "zDNumbersIconOpacitySlider", frame, "OptionsSliderTemplate")
-opacity:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -147)
+opacity:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -212)
 opacity:SetWidth(160)
 opacity:SetHeight(16)
 opacity:SetMinMaxValues(0, 100)
@@ -77,9 +92,9 @@ end)
 controls.iconOpacity = opacity
 controls.iconOpacityLabel = opacityLabel
 
-local tiltLabel = Label("Perspective depth: 12%", -190)
+local tiltLabel = Label("Perspective depth: 12%", -255)
 local tilt = CreateFrame("Slider", "zDNumbersPerspectiveTiltSlider", frame, "OptionsSliderTemplate")
-tilt:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -185)
+tilt:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -250)
 tilt:SetWidth(160)
 tilt:SetHeight(16)
 tilt:SetMinMaxValues(0, 100)
@@ -110,7 +125,7 @@ local fields = {
   { "Seconds before text begins fading", "fade" },
 }
 for i = 1, table.getn(fields) do
-  local y = -228 - (i - 1) * 36
+  local y = -293 - (i - 1) * 36
   Label(fields[i][1], y)
   local key = fields[i][2]
   local edit = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
@@ -128,9 +143,9 @@ for i = 1, table.getn(fields) do
   controls[key] = edit
 end
 
-Label("Text alignment", -410)
+Label("Text alignment", -475)
 local align = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-align:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -407)
+align:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -472)
 align:SetWidth(105); align:SetHeight(23)
 align:SetScript("OnClick", function()
   local current = Z.config.align or "CENTER"
@@ -139,7 +154,7 @@ align:SetScript("OnClick", function()
 end)
 controls.align = align
 
-local status = Label("", -447)
+local status = Label("", -512)
 status:SetWidth(420)
 controls.status = status
 
@@ -165,6 +180,9 @@ function frame:Refresh()
   if not Z.config then return end
   controls.enabled:SetChecked(Z.config.enabled == "1")
   controls.icons:SetChecked(Z.config.icons == "1")
+  local split = Z.config.split_pet == "1"
+  controls.splitPet:SetChecked(split)
+  controls.petDirectionHint:SetAlpha(split and 1 or .45)
   local opacity = math.max(0, math.min(100, tonumber(Z.config.icon_opacity) or 30))
   controls.iconOpacity.zDNumbersUpdating = true
   controls.iconOpacity:SetValue(opacity)

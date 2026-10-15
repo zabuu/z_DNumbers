@@ -1,3 +1,5 @@
+param([switch]$Deploy)
+
 $ErrorActionPreference = "Stop"
 
 $project = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -25,18 +27,20 @@ $command = 'call "' + $vcvars + '" x86 >nul && cl /nologo /LD /O1 /MT /EHsc ' +
   $inputs + ' /link /DEF:"' + $definition + '" /OUT:"' +
   (Join-Path $output "zAPI.dll") + '" user32.lib kernel32.lib'
 
-cmd.exe /d /s /c $command
-if ($LASTEXITCODE -ne 0) { throw "zAPI build failed with exit code $LASTEXITCODE" }
+Push-Location -LiteralPath $output
+try {
+    cmd.exe /d /s /c $command
+    if ($LASTEXITCODE -ne 0) { throw "zAPI build failed with exit code $LASTEXITCODE" }
+} finally {
+    Pop-Location
+}
 
 $rootDll = "g:\Games\OctoWoW\zAPI.dll"
-if (Test-Path "g:\Games\OctoWoW") {
+if ($Deploy -and (Test-Path "g:\Games\OctoWoW")) {
     try {
         Copy-Item (Join-Path $output "zAPI.dll") $rootDll -Force -ErrorAction Stop
         Write-Host "Deployed zAPI.dll to $rootDll"
     } catch {
-        $tempOld = "g:\Games\OctoWoW\zAPI_" + (Get-Random) + ".old"
-        Move-Item $rootDll $tempOld -Force
-        Copy-Item (Join-Path $output "zAPI.dll") $rootDll -Force
-        Write-Host "Deployed zAPI.dll to $rootDll (previous version moved to $tempOld)"
+        throw "DLL deployment failed. Close the game fully before deploying: $($_.Exception.Message)"
     }
 }

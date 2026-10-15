@@ -1,11 +1,14 @@
 # zAPI
 
-Small native projection API for the 32-bit WoW 1.12.1.5875 client used by
+Native utility API for the 32-bit WoW 1.12.1.5875 client used by
 OctoWoW. It is loaded through VanillaFixes `dlls.txt` and registers one Lua
 global without detouring UnitXP:
 
 ```lua
 zAPI("version")
+petCommandVersion = zAPI("petCommandVersion") -- 1 when the bridge is compatible
+submitted, reason = zAPI("petCommand", "attack", unitTokenOrGUID)
+submitted, reason = zAPI("petCommand", "follow") -- also "stay" and "passive"
 x, y, z, height = zAPI("unitPosition", unitTokenOrGUID)
 x, y, z, height = zAPI("losPosition", unitTokenOrGUID)
 x, y, depth = zAPI("worldToScreen", worldX, worldY, worldZ)
@@ -49,3 +52,24 @@ native-to-UI viewport mapping.
 The DLL validates the expected x86 client timestamp and image size before
 installing its single hook. Unsupported clients fail closed instead of using
 unchecked addresses.
+
+The zAPI 2.0 pet bridge uses the same fastcall dispatcher and command values
+as this client's PetAttack/PetFollow/PetWait/PetPassiveMode. It passes the
+victim GUID directly, so it never changes the player's target or target history.
+Only those four commands are exposed. The caller must still check hostility,
+crowd control, recall, feeding, mode and distance; zPet performs those checks.
+The native side checks the live-world byte flag, resolves a living active pet,
+validates a living attack target, and verifies the dispatcher's byte signature.
+An unsupported build or detour rejects the bridge.
+
+The call temporarily sets the frame-script context to zero only around the
+fixed pet dispatcher. It restores the saved context and depth with Windows
+structured exception handling, rejects reentry, and does not accept arbitrary
+Lua or numeric opcodes. `submitted == 1` means the dispatcher returned;
+zPet separately waits for pet-target/action acknowledgement. Zero plus a reason
+means rejection. No extra client hook or continuous native scan is installed.
+
+Build with `./build.ps1`. Deployment is explicit (`./build.ps1 -Deploy`) and
+requires replacing the game-root DLL; a locked file fails without renaming a
+loaded DLL. Back up that DLL before deploying. A full game restart is required,
+because `/reload` cannot replace the DLL already loaded into the client.

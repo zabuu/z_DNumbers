@@ -21,7 +21,7 @@ MikTRO.__index = MikTRO;
 -- **********************************************************************************
 function MikTRO:NewRecyclerObject(maxEntries)
  -- Create a table to use.
- recyclerObject = {};
+ local recyclerObject = {};
 
  -- Create a table to hold the cache entries and set its max permanent size.
  recyclerObject.PrimaryCache = {};
@@ -41,6 +41,7 @@ function MikTRO:NewRecyclerObject(maxEntries)
  -- in cache usage to still be optimized while not preventing garbage
  -- collection on the extra data once there are no other references to them.
  recyclerObject.OverflowCache = {};
+ recyclerObject.OverflowNext = 0;
  setmetatable(recyclerObject.OverflowCache, {__mode = "v"});
 
 
@@ -70,17 +71,19 @@ function MikTRO:AcquireTable()
 
  -- Check if there are any tables available in the overflow cache and if so
  -- return one.
- elseif self:TablesInOverflow() then
-  -- Increment the number of recycled tables.
-  self.NumRecycled = self.NumRecycled + 1;
+ else
+  local index, cached = next(self.OverflowCache);
+  if index then
+   -- Increment the number of recycled tables.
+   self.NumRecycled = self.NumRecycled + 1;
 
-  -- Loop through the tables in the overflow and return one.
-  for i in pairs(self.OverflowCache) do
-   return table.remove(self.OverflowCache, i);
+   -- Weak values can leave holes. Removing by array position can shift or
+   -- miss another live entry; take the actual occupied slot directly.
+   self.OverflowCache[index] = nil;
+   return cached;
   end
 
- -- No tables available so return a new one.
- else
+  -- No tables available so return a new one.
   -- Increment the number of new tables created.
   self.NumNew = self.NumNew + 1;
   return {};
@@ -103,7 +106,8 @@ function MikTRO:ReclaimTable(t)
  -- Check if the primary cache is already full.
  if (table.getn(self.PrimaryCache) >= self.MaxEntries) then
   -- Insert the table into the overflow cache.
-  table.insert(self.OverflowCache, t);
+  self.OverflowNext = self.OverflowNext + 1;
+  self.OverflowCache[self.OverflowNext] = t;
  else
   -- Insert the table into the primary cache.
   table.insert(self.PrimaryCache, t);
