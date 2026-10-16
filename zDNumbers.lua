@@ -13,6 +13,8 @@ local defaults = {
   fade = ".65",
   align = "CENTER",
   split_pet = "0",
+  pet_anchor = "PET",
+  pet_forward = ".65",
 }
 
 local function MergeDefaults(target)
@@ -218,7 +220,17 @@ local function NativeProject(record, verticalOffset)
   if verticalOffset == 0 and sample.time == now and sample.api == zAPI and sample.identifier == identifier then
     return sample.x, sample.y, sample.depth, sample.wx, sample.wy, sample.wz
   end
-  local ok, x, y, depth, worldX, worldY, worldZ = pcall(zAPI, "projectUnit", identifier, verticalOffset)
+  local ok, x, y, depth, worldX, worldY, worldZ
+  if record.petOwner then
+    ok, x, y, depth, worldX, worldY, worldZ = pcall(zAPI, "projectUnitForward", identifier,
+      verticalOffset + .25, tonumber(Z.config.pet_forward) or .65)
+    -- Older DLLs retain a safe head anchor until the native update is installed.
+    if not ok or type(x) ~= "number" then
+      ok, x, y, depth, worldX, worldY, worldZ = pcall(zAPI, "projectUnit", identifier, verticalOffset + .25)
+    end
+  else
+    ok, x, y, depth, worldX, worldY, worldZ = pcall(zAPI, "projectUnit", identifier, verticalOffset)
+  end
   if verticalOffset == 0 then
     sample.time, sample.api, sample.identifier = now, zAPI, identifier
     sample.x, sample.y, sample.depth, sample.wx, sample.wy, sample.wz = nil, nil, nil, nil, nil, nil
@@ -525,6 +537,7 @@ local function ClearAnimations(record)
     local item = record.frame.items[i]
     if item then
       item.active = nil
+      item.fallbackEvent = nil
       item.petOrbitRadius, item.petPlacedTime = nil, nil
       SetTextPerspective(item, 0)
       item.text:Hide()
@@ -595,6 +608,15 @@ end
 
 local function ConfigureRecord(record)
   if not record or not record.frame then return end
+  if record.petOwner then
+    local width=math.max(20,tonumber(Z.config.width) or 120)
+    local height=math.max(10,tonumber(Z.config.height) or 142)
+    if record.configWidth~=width or record.configHeight~=height then
+      record.frame:SetSize(width,height); record.frame.configHeight=height
+      record.configWidth,record.configHeight=width,height
+    end
+    return
+  end
   local anchor = FindHealthAnchor(record.base)
   local parent = anchor.GetParent and anchor:GetParent() or record.base
   local width = tonumber(Z.config.width) or 120
@@ -932,6 +954,13 @@ local function AddAnimation(record, animationEvent)
   local anchor, justify = Alignment()
   slot.active = true
   slot.isPet = isPet
+  slot.fallbackEvent = nil
+  if record.petOwner then
+    -- MSBT recycles the source event immediately after this callback. Retain
+    -- our own shallow record only while the pet number is alive, for fallback.
+    slot.fallbackEvent = {}
+    for key,value in pairs(animationEvent) do slot.fallbackEvent[key]=value end
+  end
   slot.pendingRender = true
   slot.text:Hide()
   slot.startTime = now
@@ -1008,6 +1037,7 @@ end
 local function RetireAnimationItem(item)
   item.active = nil
   item.pendingRender = nil
+  item.fallbackEvent = nil
   item.stackOffset, item.displayPosition, item.stackTarget = nil, nil, nil
   item.native3D = nil
   item.visualSize = nil
@@ -1401,12 +1431,40 @@ local function PlacePetNumber(frame, item, orbit, now, elapsed, hasMain, originX
   end
 end
 
+local function PetAnchorVisible(record, now)
+  if not UnitExists or not UnitExists("pet") then return end
+  local guid=UnitGUID and UnitGUID("pet")
+  if record.guid and guid and record.guid~=guid then return end
+  record.unit,record.guid="pet",guid
+  local x,y,depth=NativeProject(record,0)
+  if not x or x<0 or x>1 or y<0 or y>1 or depth<=0 then return end
+  record.frame:SetPoint("BOTTOM",UIParent,"BOTTOMLEFT",
+    x*UIParent:GetWidth()+(tonumber(Z.config.x) or 0),
+    y*UIParent:GetHeight()+(tonumber(Z.config.y) or 8))
+  return true
+end
+
+local function FallBackPetAnimations(record)
+  for i=1,TEXT_SLOTS do
+    local item=record.frame.items[i]
+    if item and item.active and item.fallbackEvent and MikSBT.AddAnimation then
+      local saved=item.fallbackEvent; item.fallbackEvent=nil
+      MikSBT.AddAnimation(saved)
+    end
+  end
+  ClearAnimations(record)
+end
+
 local function UpdateAnimations(record, now)
   local frame = record and record.frame
   if not frame or not frame:IsShown() then return end
   if not Enabled() then
     if record.frozen then ReleaseFadingRecord(record) else ClearAnimations(record) end
     return
+  end
+  if record.petOwner then
+    if Z.config.split_pet~="1" or Z.config.pet_anchor=="TARGET" then ClearAnimations(record); return end
+    if not PetAnchorVisible(record,now) then FallBackPetAnimations(record); return end
   end
 
   local height = frame.configHeight or tonumber(Z.config.height) or 80
@@ -1435,7 +1493,7 @@ local function UpdateAnimations(record, now)
 
   local spacingElapsed = now - (frame.spacingLastTime or now - 1/60)
   frame.spacingLastTime = now
-  local split = Z.config.split_pet == "1"
+  local split = Z.config.split_pet == "1" and not record.petOwner
   local frameScale = frame.GetEffectiveScale and frame:GetEffectiveScale() or 1
   local uiScale = UIParent.GetEffectiveScale and UIParent:GetEffectiveScale() or 1
   local scale = frameScale / math.max(.001, uiScale)
@@ -1536,6 +1594,21 @@ end
 
 local function HandleOutgoing(animationEvent)
   local targetGuid = animationEvent.TargetGUID or ConsumeGuidHint(animationEvent)
+  if IsPetAnimation(animationEvent) and Z.config.split_pet=="1" and Z.config.pet_anchor~="TARGET" then
+    local record=Z.petRecord
+    if not record then
+      local frame=CreateFrame("Frame",nil,UIParent)
+      frame:SetFrameStrata("TOOLTIP"); frame:SetFrameLevel(100); frame.items={}; frame:Hide()
+      record={petOwner=true,frame=frame}; Z.petRecord=record
+    end
+    if record.guid and UnitGUID and record.guid~=UnitGUID("pet") then
+      FallBackPetAnimations(record); record.guid=nil; record.nativeProjectionSample=nil
+    end
+    ConfigureRecord(record)
+    if not PetAnchorVisible(record,GetTime()) then return false end
+    if MikSBT.PrepareExternalAnimationEvent(animationEvent) then AddAnimation(record,animationEvent) end
+    return true
+  end
   if not MikSBT.PrepareExternalAnimationEvent(animationEvent) then return end
   local record = FindRecord(animationEvent.Name, targetGuid)
   if not record then
@@ -1632,6 +1705,11 @@ function Z.HideDummyDamage(bases)
 end
 
 function Z.Refresh()
+  if Z.petRecord then
+    Z.petRecord.nativeProjectionSample=nil
+    ConfigureRecord(Z.petRecord)
+    if not Enabled() or Z.config.split_pet~="1" or Z.config.pet_anchor=="TARGET" then ClearAnimations(Z.petRecord) end
+  end
   ScanVisibleNameplates()
   for record in pairs(visibleRecords) do
     ConfigureRecord(record)
@@ -1681,6 +1759,7 @@ eventFrame:SetScript("OnEvent", function()
     if Z.options and Z.options.Refresh then Z.options:Refresh() end
     return
   elseif event == "PLAYER_ENTERING_WORLD" then
+    if Z.petRecord then ClearAnimations(Z.petRecord); Z.petRecord.guid=nil; Z.petRecord.nativeProjectionSample=nil end
     Z.EnsureEmbeddedMSBT()
     RegisterMSBTIntegration()
     cachedWorldChildCount = -1

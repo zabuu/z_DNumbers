@@ -6,6 +6,11 @@ global without detouring UnitXP:
 
 ```lua
 zAPI("version")
+bufferVersion = zAPI("nearbyBufferVersion") -- 1 for the reusable output contract
+-- Keep a private dense output array; subsequent calls replace its contents.
+nearby = {}
+count = zAPI("nearbyCreaturesInto", 30, "pet", nearby)
+legacyCalls, bufferCalls, nativeGrowths, retainedCapacity = zAPI("nearbyScanStats")
 petCommandVersion = zAPI("petCommandVersion") -- 1 when the bridge is compatible
 submitted, reason = zAPI("petCommand", "attack", unitTokenOrGUID)
 submitted, reason = zAPI("petCommand", "follow") -- also "stay" and "passive"
@@ -14,6 +19,10 @@ x, y, z, height = zAPI("losPosition", unitTokenOrGUID)
 x, y, depth = zAPI("worldToScreen", worldX, worldY, worldZ)
 x, y, depth, worldX, worldY, worldZ = zAPI("projectUnit", unitTokenOrGUID, verticalOffset)
 x, y, depth, worldX, worldY, worldZ = zAPI("projectNameplate", unitTokenOrGUID, verticalOffset)
+x, y, depth, worldX, worldY, worldZ = zAPI("projectUnitForward", unitTokenOrGUID, verticalOffset, forwardYards)
+groundVersion = zAPI("groundObjectVersion") -- 1 in zAPI 2.2
+guid, x, y, z, objectType, entryOrSpellID, state = zAPI("groundObject", objectType, entryOrSpellID, excludedGUID)
+guid, x, y, z, objectType, entryOrSpellID, state = zAPI("groundObjectState", guid)
 tick, sourceX, sourceY, sourceDepth, sourceWorldX, sourceWorldY, sourceWorldZ,
   targetX, targetY, targetDepth, targetWorldX, targetWorldY, targetWorldZ =
   zAPI("projectLine", sourceUnit, targetUnit, sourceZOffset, targetZOffset)
@@ -69,7 +78,77 @@ Lua or numeric opcodes. `submitted == 1` means the dispatcher returned;
 zPet separately waits for pet-target/action acknowledgement. Zero plus a reason
 means rejection. No extra client hook or continuous native scan is installed.
 
+Version 2.1 adds reusable nearby-creature output. `nearbyCreaturesInto` returns
+the number written (including zero); nil means failure and leaves the output
+unchanged. The caller must supply a private dense array as argument four.
+Successful queries clear the old tail and update Lua 5.0's stored array length,
+so `table.getn` remains correct after shrinking/empty results. It preserves the
+same complete nearest-first creature results as `nearbyCreatures`; the legacy
+command continues returning a new independently owned table. GUIDs stay strings
+to retain all 64 bits. No Lua table pointers are retained natively.
+
+Both scan paths reuse native vector capacity, retaining at most 4,096 entries
+of scratch capacity per thread. Larger results remain complete; their excess
+capacity is released after output. Each active query owns its vector until all
+Lua output is complete, so a query reentered during Lua allocation/finalization
+cannot overwrite another query's results. `nearbyScanStats` returns cumulative
+successful legacy calls, buffer calls, queries that grew vector capacity and the current
+thread's retained capacity as scalar numbers. These diagnose this scan path;
+they are not allocator or garbage-collector duration statistics.
+
+zPet 1.4.3 probes `nearbyBufferVersion` once, uses a private reused array with
+compatible DLLs and keeps the old command for older DLLs. Its existing 0.5-second
+query cache and object-discovery opt-in remain. Distance-cache records are reused
+with a bounded 256-record free pool; distance freshness, invalidation, unknown
+results and pet behavior remain. Neither addon changes GC settings or forces
+collections. This reduces one source of temporary allocations; live captures
+are still needed to measure any effect on hitches.
+
 Build with `./build.ps1`. Deployment is explicit (`./build.ps1 -Deploy`) and
 requires replacing the game-root DLL; a locked file fails without renaming a
 loaded DLL. Back up that DLL before deploying. A full game restart is required,
 because `/reload` cannot replace the DLL already loaded into the client.
+
+Version 2.2 adds read-only forward projection and owned-ground-object queries.
+`projectUnitForward` offsets XY along the unit's live facing, not the camera's,
+and retains the usual collision-height + vertical-offset projection. Forward
+distance must be finite and between 0 and 8 yards. zDNumbers uses it for a
+pet-nose damage anchor.
+
+`groundObject` scans for one matching player-owned trap (object type 5, trap GO
+type 6, ID = object entry) or dynamic object (type 6, ID = generating spell).
+It can exclude the preceding GUID during a replacement cast.
+`groundObjectState` resolves a known owned GUID directly without a scan. Both
+validate object type, descriptor range, descriptor GUID, owner GUID and finite
+coordinates, returning nil on failure. They do not expose other players' hidden
+traps, accept memory addresses, change targets, install new hooks, or draw
+native cards. Position/type/owner fields follow the
+[1.12.1 UpdateFields contract](https://github.com/vmangos/core/blob/development/src/game/Objects/UpdateFields_1_12_1.h).
+The addon, not this native API, tracks observed creation/trigger time and expiry.
+
+Version 2.3 adds signature-verified GC controls for OctoGC:
+
+```lua
+compatible = zAPI("gcControlVersion") -- 1 or 0
+luaKB, thresholdKB, virtualFreeKB, totalVirtualKB, commitFreeKB = zAPI("gcStatus")
+accepted, reason = zAPI("gcSetThreshold", thresholdKB)
+accepted, milliseconds, freedKB, afterKB, nextThresholdKB = zAPI("gcCollect")
+```
+
+`gcSetThreshold` accepts integral KB, at least live usage plus 1 MiB and at
+most 1 GiB. Raising it additionally requires enough virtual address space for
+the remaining Lua headroom plus 256 MiB, and commit headroom plus 128 MiB.
+Lowering to a still-safe value is allowed under pressure. It cannot request a
+collection. Callers must also respect their script-memory budget; OctoGC does.
+
+`gcCollect` is the separate full-cycle command. It rejects player or pet combat,
+unknown world/unit state, bad descriptor pointers and recursive collection.
+It uses the verified public Lua 5.0 threshold API with zero, timing the actual
+call with QPC. Other commands never fall through to collection. Failure returns
+`0, reason`. No hook/VM patch or global collectgarbage replacement is added.
+Exact count/threshold/setter entry bytes must match the inspected client.
+
+These controls make bounded combat deferral possible; they do not promise that
+all collection can be postponed safely or that full cleanup becomes incremental.
+The Lua scheduler, tests and limits are documented in `OctoGC/README.md` under
+the AddOns root. Existing 2.2 forward/ground queries and earlier APIs remain.

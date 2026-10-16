@@ -14,6 +14,7 @@
 
 #include "MinHook.h"
 #include "ScopedPetCommand.h"
+#include "GcControl.h"
 
 namespace {
 
@@ -24,6 +25,12 @@ constexpr DWORD kExpectedImageSize = 0x0092B000;
 constexpr uintptr_t kFrameScriptRegisterFunction = 0x00704120;
 constexpr uintptr_t kLuaState = 0x00CEEF74;
 constexpr uintptr_t kLuaGetTop = 0x006F3070;
+constexpr uintptr_t kLuaType = 0x006F3400;
+constexpr uintptr_t kLuaLGetN = 0x006F5050;
+constexpr uintptr_t kLuaLSetN = 0x006F4EA0;
+constexpr uintptr_t kLuaGetGCThreshold = 0x006F43E0;
+constexpr uintptr_t kLuaGetGCCount = 0x006F43F0;
+constexpr uintptr_t kLuaSetGCThreshold = 0x006F4400;
 constexpr uintptr_t kLuaIsNumber = 0x006F34D0;
 constexpr uintptr_t kLuaToNumber = 0x006F3620;
 constexpr uintptr_t kLuaToString = 0x006F3690;
@@ -98,6 +105,11 @@ struct ProjectionResult {
 using LuaCFunction = int(__fastcall *)(void *L);
 using FrameScriptRegisterFunctionFn = void(__fastcall *)(const char *, LuaCFunction);
 using LuaGetTopFn = int(__fastcall *)(void *);
+using LuaTypeFn = int(__fastcall *)(void *, int);
+using LuaLGetNFn = int(__fastcall *)(void *, int);
+using LuaLSetNFn = void(__fastcall *)(void *, int, int);
+using LuaGetGCFn = uint32_t(__fastcall *)(void *);
+using LuaSetGCFn = void(__fastcall *)(void *, uint32_t);
 using LuaIsNumberFn = int(__fastcall *)(void *, int);
 using LuaToNumberFn = double(__fastcall *)(void *, int);
 using LuaToStringFn = const char *(__fastcall *)(void *, int);
@@ -189,6 +201,7 @@ void *FollowExistingJump(void *entry) {
 }
 
 int LuaGetTop(void *L) { return At<LuaGetTopFn>(kLuaGetTop)(L); }
+int LuaType(void *L, int index) { return At<LuaTypeFn>(kLuaType)(L, index); }
 bool LuaIsNumber(void *L, int index) { return At<LuaIsNumberFn>(kLuaIsNumber)(L, index) != 0; }
 double LuaToNumber(void *L, int index) { return At<LuaToNumberFn>(kLuaToNumber)(L, index); }
 const char *LuaToString(void *L, int index) { return At<LuaToStringFn>(kLuaToString)(L, index); }
@@ -414,6 +427,93 @@ bool ResolveUnit(const char *identifier, uint32_t &unit) {
   return objectType == kObjectTypeUnit || objectType == kObjectTypePlayer;
 }
 
+bool GcControlAvailable() {
+  // Verify the installed client's public API, including the conditional tail
+  // call to full GC. A patched/detoured entry disables this optional feature.
+  static const uint8_t countBytes[] = {0x8B,0x41,0x10,0x8B,0x40,0x28,0xC1,0xE8,0x0A,0xC3};
+  static const uint8_t thresholdBytes[] = {0x8B,0x41,0x10,0x8B,0x40,0x24,0xC1,0xE8,0x0A,0xC3};
+  static const uint8_t setterBytes[] = {
+    0x81,0xFA,0xFF,0xFF,0x3F,0x00,0x8B,0x41,0x10,0x76,0x09,0xC7,0x40,0x24,
+    0xFF,0xFF,0xFF,0xFF,0xEB,0x06,0xC1,0xE2,0x0A,0x89,0x50,0x24,0x8B,0x41,
+    0x10,0x8B,0x50,0x28,0x3B,0x50,0x24,0x72,0x05,0xE9,0x16,0x2F,0x00,0x00,0xC3};
+  return IsReadable(At<uintptr_t>(kLuaGetGCCount), sizeof(countBytes)) &&
+    IsReadable(At<uintptr_t>(kLuaGetGCThreshold), sizeof(thresholdBytes)) &&
+    IsReadable(At<uintptr_t>(kLuaSetGCThreshold), sizeof(setterBytes)) &&
+    std::memcmp(At<void *>(kLuaGetGCCount), countBytes, sizeof(countBytes)) == 0 &&
+    std::memcmp(At<void *>(kLuaGetGCThreshold), thresholdBytes, sizeof(thresholdBytes)) == 0 &&
+    std::memcmp(At<void *>(kLuaSetGCThreshold), setterBytes, sizeof(setterBytes)) == 0;
+}
+
+bool GcCombatClear() {
+  if (!IsReadable(At<uintptr_t>(kInWorld), 1) || *At<const uint8_t *>(kInWorld) == 0)
+    return false;
+  const char *tokens[] = {"player", "pet"};
+  for (size_t i = 0; i < 2; ++i) {
+    const char *token = tokens[i];
+    const uint64_t guid = ResolveGuid(token);
+    if (!guid) { if (i == 0) return false; else continue; }
+    uint32_t unit = 0;
+    if (!ResolveUnit(token, unit) || !IsReadable(unit + 0x110, 4) ||
+        (i == 0 && *reinterpret_cast<const int *>(unit + 0x14) != kObjectTypePlayer)) return false;
+    const uint32_t fields = *reinterpret_cast<const uint32_t *>(unit + 0x110);
+    if (!IsReadable(fields + 0xA0, 4) ||
+        (*reinterpret_cast<const uint32_t *>(fields + 0xA0) & 0x00080000) != 0)
+      return false;
+  }
+  return true;
+}
+
+int GcReject(void *L, const char *reason) {
+  LuaPushNumber(L, 0); LuaPushString(L, reason); return 2;
+}
+
+int ScriptGcControl(void *L, const char *command) {
+  if (std::strcmp(command, "gcControlVersion") == 0) {
+    LuaPushNumber(L, GcControlAvailable() ? 1 : 0); return 1;
+  }
+  if (!GcControlAvailable()) return GcReject(L, "GC API signature mismatch");
+  const uint32_t used = At<LuaGetGCFn>(kLuaGetGCCount)(L);
+  const uint32_t threshold = At<LuaGetGCFn>(kLuaGetGCThreshold)(L);
+  MEMORYSTATUSEX memory{}; memory.dwLength = sizeof(memory);
+  if (!GlobalMemoryStatusEx(&memory)) return GcReject(L, "memory status unavailable");
+  if (std::strcmp(command, "gcStatus") == 0) {
+    LuaPushNumber(L, used); LuaPushNumber(L, threshold);
+    LuaPushNumber(L, static_cast<double>(memory.ullAvailVirtual / 1024));
+    LuaPushNumber(L, static_cast<double>(memory.ullTotalVirtual / 1024));
+    LuaPushNumber(L, static_cast<double>(memory.ullAvailPageFile / 1024));
+    return 5;
+  }
+  if (std::strcmp(command, "gcSetThreshold") == 0) {
+    if (LuaGetTop(L) < 2 || !LuaIsNumber(L, 2)) return GcReject(L, "numeric KB threshold required");
+    const double requested = LuaToNumber(L, 2);
+    const char *reason = GcThresholdRejection(used, threshold, requested,
+      static_cast<double>(memory.ullAvailVirtual / 1024),
+      static_cast<double>(memory.ullAvailPageFile / 1024));
+    if (reason) return GcReject(L, reason);
+    At<LuaSetGCFn>(kLuaSetGCThreshold)(L, static_cast<uint32_t>(requested));
+    LuaPushNumber(L, 1); return 1;
+  }
+  if (std::strcmp(command, "gcCollect") != 0) return GcReject(L, "unknown GC command");
+  if (!GcCombatClear()) return GcReject(L, "player/pet combat or world state prevents collection");
+  static bool collecting = false;
+  if (collecting) return GcReject(L, "collection already active");
+  collecting = true;
+  LARGE_INTEGER frequency{}, started{}, finished{};
+  QueryPerformanceFrequency(&frequency); QueryPerformanceCounter(&started);
+  __try {
+    At<LuaSetGCFn>(kLuaSetGCThreshold)(L, 0);
+  } __finally { collecting = false; }
+  QueryPerformanceCounter(&finished);
+  const uint32_t after = At<LuaGetGCFn>(kLuaGetGCCount)(L);
+  LuaPushNumber(L, 1);
+  LuaPushNumber(L, frequency.QuadPart > 0 ?
+    (finished.QuadPart - started.QuadPart) * 1000.0 / frequency.QuadPart : 0);
+  LuaPushNumber(L, used > after ? used - after : 0);
+  LuaPushNumber(L, after);
+  LuaPushNumber(L, At<LuaGetGCFn>(kLuaGetGCThreshold)(L));
+  return 5;
+}
+
 bool PetCommandBridgeAvailable() {
   // Fail closed if another client build or a detour changes this ABI.
   // Byte-verified against the installed 1.12.1.5875 PetAttack dispatcher.
@@ -526,8 +626,16 @@ struct NearbyCreature {
 struct NearbyCtx {
   Vec3 refPos{};
   float maxDistSq = 0.0f;
-  std::vector<NearbyCreature> results;
+  std::vector<NearbyCreature> &results;
 };
+
+// A query swaps cached capacity into its private vector through Lua output.
+// GC/finalizer reentry can then borrow other storage without changing it.
+thread_local std::vector<NearbyCreature> g_nearbyScratch;
+thread_local bool g_nearbyBusy = false;
+constexpr size_t kNearbyRetainedLimit = 4096;
+uint64_t g_nearbyLegacyCalls = 0, g_nearbyBufferCalls = 0;
+uint64_t g_nearbyGrowths = 0;
 
 int __fastcall EnumCreaturesCallback(NearbyCtx *ctx, void * /*unusedEdx*/, uint64_t guid) {
   if (!ctx) return 0;
@@ -556,6 +664,58 @@ bool SafeEnumVisible(EnumVisibleCallbackFn cb, void *ctx) {
   }
 }
 
+// Read-only 1.12.1 UpdateFields. CGObject +0x08 is the base descriptor,
+// including OBJECT_FIELD_GUID; never confuse it with CGUnit's +0x110 block.
+struct GroundObject {
+  uint64_t guid = 0;
+  Vec3 position{};
+  uint32_t type = 0, id = 0, state = 0;
+};
+
+bool ReadOwnGroundObject(uint64_t guid, uint64_t owner, GroundObject &result) {
+  __try {
+    const uint32_t object = At<GetObjectByGuidFn>(kGetObjectByGuid)(guid);
+    if (!owner || !IsReadable(object, 0x18)) return false;
+    const uint32_t type = *reinterpret_cast<const uint32_t *>(object + 0x14);
+    if (type != 5 && type != 6) return false;
+    const uint32_t fields = *reinterpret_cast<const uint32_t *>(object + 0x08);
+    const size_t size = type == 5 ? 0x68 : 0x40;
+    if (!fields || !IsReadable(fields, size) ||
+        *reinterpret_cast<const uint64_t *>(fields) != guid ||
+        *reinterpret_cast<const uint64_t *>(fields + 0x18) != owner) return false;
+    // GO type 6 is a trap. Dynamic objects carry the generating spell ID.
+    if (type == 5 && *reinterpret_cast<const uint32_t *>(fields + 0x54) != 6) return false;
+    result.guid = guid; result.type = type;
+    result.id = *reinterpret_cast<const uint32_t *>(fields + (type == 5 ? 0x0C : 0x24));
+    result.state = type == 5 ? *reinterpret_cast<const uint32_t *>(fields + 0x38) : 0;
+    const uintptr_t position = fields + (type == 5 ? 0x3C : 0x2C);
+    result.position = *reinterpret_cast<const Vec3 *>(position);
+    return std::isfinite(result.position.x) && std::isfinite(result.position.y) &&
+           std::isfinite(result.position.z) && result.id != 0;
+  } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+struct GroundQuery {
+  uint64_t owner = 0, exclude = 0;
+  uint32_t type = 0, id = 0;
+  GroundObject result{};
+};
+int __fastcall EnumGroundObject(GroundQuery *query, void *, uint64_t guid) {
+  if (!query || guid == query->exclude) return 1;
+  GroundObject object{};
+  if (!ReadOwnGroundObject(guid, query->owner, object) || object.type != query->type || object.id != query->id) return 1;
+  query->result = object;
+  return 0;
+}
+
+bool UnitFacing(uint32_t unit, float &facing) {
+  __try {
+    if (!IsReadable(unit + 0x9C4, sizeof(float))) return false;
+    facing = *reinterpret_cast<const float *>(unit + 0x9C4);
+    return std::isfinite(facing) && facing >= -0.01f && facing <= 6.30f;
+  } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 bool SafeSetTarget(const uint64_t *guid) {
   __try {
     At<SetTargetByGuidFn>(kSetTargetByGuid)(guid);
@@ -573,7 +733,14 @@ char SafeIntersect(const Vec3 *start, const Vec3 *end, Vec3 *hit, float *t, uint
   }
 }
 
-int DoNearbyCreatures(void *L, float maxRange, const char *centerToken) {
+int DoNearbyCreatures(void *L, float maxRange, const char *centerToken, bool reuse = false) {
+  // Reusable output is an ordinary dense Lua array, never a retained native
+  // reference into the Lua heap. Validate before raw array writes.
+  if ((reuse && (LuaGetTop(L) < 4 || LuaType(L, 4) != 5)) || g_nearbyBusy ||
+      !std::isfinite(maxRange) || maxRange < 0.0f) {
+    LuaPushNil(L);
+    return 1;
+  }
   uint32_t centerUnit = 0;
   Vec3 centerPos{};
   if (!ResolveUnit(centerToken, centerUnit) || !UnitPosition(centerUnit, centerPos)) {
@@ -581,8 +748,23 @@ int DoNearbyCreatures(void *L, float maxRange, const char *centerToken) {
     return 1;
   }
 
-  NearbyCtx ctx{centerPos, maxRange * maxRange, {}};
+  const int previousCount = reuse ? At<LuaLGetNFn>(kLuaLGetN)(L, 4) : 0;
+  // Avoid unbounded work on a malformed/sparse caller-owned buffer.
+  if (previousCount < 0 || previousCount > 1000000) {
+    LuaPushNil(L);
+    return 1;
+  }
+  // Keep a private result vector until Lua output is finished. A second query
+  // can be entered by a Lua finalizer while a GUID string is being pushed.
+  std::vector<NearbyCreature> results;
+  results.swap(g_nearbyScratch);
+  results.clear();
+  const size_t oldCapacity = results.capacity();
+  NearbyCtx ctx{centerPos, maxRange * maxRange, results};
+  g_nearbyBusy = true;
   if (!SafeEnumVisible(reinterpret_cast<EnumVisibleCallbackFn>(&EnumCreaturesCallback), &ctx)) {
+    g_nearbyBusy = false;
+    if (results.capacity() <= kNearbyRetainedLimit) results.swap(g_nearbyScratch);
     LuaPushNil(L);
     return 1;
   }
@@ -591,14 +773,29 @@ int DoNearbyCreatures(void *L, float maxRange, const char *centerToken) {
             [](const NearbyCreature &a, const NearbyCreature &b) {
               return a.dist < b.dist;
             });
-
-  LuaNewTable(L);
+  g_nearbyBusy = false;
+  if (results.capacity() > oldCapacity) ++g_nearbyGrowths;
+  if (reuse) ++g_nearbyBufferCalls;
+  else { ++g_nearbyLegacyCalls; LuaNewTable(L); }
+  const int outputIndex = reuse ? 4 : LuaGetTop(L);
   char guidStr[24];
   for (size_t i = 0; i < ctx.results.size(); ++i) {
     std::snprintf(guidStr, sizeof(guidStr), "0x%016llX", ctx.results[i].guid);
     LuaPushString(L, guidStr);
-    LuaRawSetI(L, -2, static_cast<int>(i + 1));
+    LuaRawSetI(L, outputIndex, static_cast<int>(i + 1));
   }
+  if (reuse) {
+    for (int i = static_cast<int>(results.size()) + 1; i <= previousCount; ++i) {
+      LuaPushNil(L);
+      LuaRawSetI(L, outputIndex, i);
+    }
+    // Lua 5.0 table.getn can use an out-of-band size; raw writes alone do not
+    // update it. This is the verified client luaL_setn ABI, not Lua 5.1 objlen.
+    At<LuaLSetNFn>(kLuaLSetN)(L, outputIndex, static_cast<int>(results.size()));
+    LuaPushNumber(L, static_cast<double>(results.size()));
+  }
+  if (results.capacity() <= kNearbyRetainedLimit && g_nearbyScratch.empty())
+    results.swap(g_nearbyScratch);
   return 1;
 }
 
@@ -975,8 +1172,27 @@ int __fastcall Script_zAPI(void *L) {
   }
 
   if (std::strcmp(command, "version") == 0) {
-    LuaPushNumber(L, 2.0);
+    LuaPushNumber(L, 2.3);
     return 1;
+  }
+
+  if (std::strcmp(command, "gcControlVersion") == 0 ||
+      std::strcmp(command, "gcStatus") == 0 ||
+      std::strcmp(command, "gcSetThreshold") == 0 ||
+      std::strcmp(command, "gcCollect") == 0)
+    return ScriptGcControl(L, command);
+
+  if (std::strcmp(command, "nearbyBufferVersion") == 0) {
+    LuaPushNumber(L, 1.0);
+    return 1;
+  }
+
+  if (std::strcmp(command, "nearbyScanStats") == 0) {
+    LuaPushNumber(L, static_cast<double>(g_nearbyLegacyCalls));
+    LuaPushNumber(L, static_cast<double>(g_nearbyBufferCalls));
+    LuaPushNumber(L, static_cast<double>(g_nearbyGrowths));
+    LuaPushNumber(L, static_cast<double>(g_nearbyScratch.capacity()));
+    return 4;
   }
 
   if (std::strcmp(command, "petCommandVersion") == 0) {
@@ -1100,6 +1316,30 @@ int __fastcall Script_zAPI(void *L) {
     return 4;
   }
 
+  if (std::strcmp(command, "groundObjectVersion") == 0) {
+    LuaPushNumber(L, 1.0); return 1;
+  }
+  if (std::strcmp(command, "groundObjectState") == 0 || std::strcmp(command, "groundObject") == 0) {
+    GroundObject result{};
+    const uint64_t owner = ResolveGuid("player");
+    if (std::strcmp(command, "groundObjectState") == 0 && LuaGetTop(L) >= 2) {
+      if (!ReadOwnGroundObject(ResolveGuid(LuaToString(L, 2)), owner, result)) result = GroundObject{};
+    } else if (LuaGetTop(L) >= 3 && LuaIsNumber(L, 2) && LuaIsNumber(L, 3)) {
+      GroundQuery query{}; query.owner = owner;
+      query.type = static_cast<uint32_t>(LuaToNumber(L, 2));
+      query.id = static_cast<uint32_t>(LuaToNumber(L, 3));
+      query.exclude = LuaGetTop(L) >= 4 ? ResolveGuid(LuaToString(L, 4)) : 0;
+      if ((query.type == 5 || query.type == 6) && query.id &&
+          SafeEnumVisible(reinterpret_cast<EnumVisibleCallbackFn>(EnumGroundObject), &query)) result = query.result;
+    }
+    if (!result.guid) { LuaPushNil(L); return 1; }
+    char guid[19]; std::snprintf(guid, sizeof(guid), "0x%016llX", result.guid);
+    LuaPushString(L, guid);
+    LuaPushNumber(L, result.position.x); LuaPushNumber(L, result.position.y); LuaPushNumber(L, result.position.z);
+    LuaPushNumber(L, result.type); LuaPushNumber(L, result.id); LuaPushNumber(L, result.state);
+    return 7;
+  }
+
   if (std::strcmp(command, "losPosition") == 0 && LuaGetTop(L) >= 2) {
     uint32_t unit = 0;
     Vec3 position{};
@@ -1133,7 +1373,8 @@ int __fastcall Script_zAPI(void *L) {
   }
 
   const bool nameplateProjection = std::strcmp(command, "projectNameplate") == 0;
-  if ((nameplateProjection || std::strcmp(command, "projectUnit") == 0) && LuaGetTop(L) >= 3 &&
+  const bool forwardProjection = std::strcmp(command, "projectUnitForward") == 0;
+  if ((nameplateProjection || forwardProjection || std::strcmp(command, "projectUnit") == 0) && LuaGetTop(L) >= 3 &&
       LuaIsNumber(L, 3)) {
     uint32_t unit = 0;
     Vec3 world{};
@@ -1143,6 +1384,14 @@ int __fastcall Script_zAPI(void *L) {
       return 1;
     }
     if (!nameplateProjection) world.z += UnitHeight(unit);
+    if (forwardProjection) {
+      float facing = 0.0f;
+      if (LuaGetTop(L) < 4 || !LuaIsNumber(L, 4) || !UnitFacing(unit, facing)) { LuaPushNil(L); return 1; }
+      const float distance = static_cast<float>(LuaToNumber(L, 4));
+      if (!std::isfinite(distance) || distance < 0 || distance > 8) { LuaPushNil(L); return 1; }
+      world.x += std::cos(facing) * distance;
+      world.y += std::sin(facing) * distance;
+    }
     world.z += static_cast<float>(LuaToNumber(L, 3));
     float x = 0.0f, y = 0.0f, depth = 0.0f;
     if (!ProjectWorld(world, x, y, depth)) {
@@ -1491,13 +1740,15 @@ int __fastcall Script_zAPI(void *L) {
     return 1;
   }
 
-  if (std::strcmp(command, "nearbyCreatures") == 0) {
+  if (std::strcmp(command, "nearbyCreatures") == 0 ||
+      std::strcmp(command, "nearbyCreaturesInto") == 0) {
     float maxRange = 30.0f;
     if (LuaGetTop(L) >= 2 && LuaIsNumber(L, 2)) {
       maxRange = static_cast<float>(LuaToNumber(L, 2));
     }
     const char *centerToken = (LuaGetTop(L) >= 3) ? LuaToString(L, 3) : "player";
-    return DoNearbyCreatures(L, maxRange, centerToken);
+    return DoNearbyCreatures(L, maxRange, centerToken,
+                            std::strcmp(command, "nearbyCreaturesInto") == 0);
   }
 
   LuaPushNil(L);

@@ -8,6 +8,7 @@
 ## SavedVariablesPerCharacter: zDNumbersDB
 
 default_profile.lua
+suite_ui.lua
 
 MikScrollingBattleText\Libs\AceLibrary\AceLibrary.lua
 MikScrollingBattleText\Libs\AceLocale-2.2\AceLocale-2.2.lua
@@ -29,6 +30,7 @@ MikScrollingBattleTextOptions\localization_options.lua
 MikScrollingBattleTextOptions\localization_options-ruRU.lua
 MikScrollingBattleTextOptions\MSBTOptions.lua
 MikScrollingBattleTextOptions\MSBTOptions.xml
+msbt_skin.lua
 
 embedded_msbt.lua
 zDNumbers.lua

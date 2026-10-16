@@ -173,6 +173,7 @@ function MikSBTOpt.Init()
  -- Insert the frame name into the UISpecialFrames array so it closes when the escape key is pressed.
  table.insert(UISpecialFrames, OPTIONS_FRAME_NAME);
  MikSBTOpt.EmbeddedInitialized = true;
+ if zDNumbers and zDNumbers.StyleMSBTOptions then zDNumbers.StyleMSBTOptions(); end
 end
 
 
@@ -301,7 +302,11 @@ function MikSBTOpt.TabOnClick(tab)
  end
 
  -- Set the selected tab
- PanelTemplates_SetTab(getglobal(OPTIONS_FRAME_NAME), tab);
+ if zDNumbers and zDNumbers.StyleMSBTTabs then
+  zDNumbers.StyleMSBTTabs(tab);
+ else
+  PanelTemplates_SetTab(getglobal(OPTIONS_FRAME_NAME), tab);
+ end
 
  -- Hide all of the tab frames.
  for tabNumber, tabData in MikSBTOpt.TABS do
@@ -794,6 +799,7 @@ function MikSBTOpt.CheckboxOnClick()
   -- Make sure there is an associated trigger event.
   if (this.TriggerEvent) then
    local triggerFrame = getglobal(TRIGGER_CONFIGURATION_FRAME_NAME);
+   MikSBTOpt.EnsureSelectedTriggerEvents(triggerFrame);
    if (this:GetChecked()) then
     triggerFrame.SelectedTriggerEvents[this.TriggerEvent] = true;
    else
@@ -3523,6 +3529,18 @@ end
 -- **********************************************************************************
 -- Show or hides the search pattern controls on the trigger config frame.
 -- **********************************************************************************
+function MikSBTOpt.EnsureSelectedTriggerEvents(triggerFrame)
+ if type(triggerFrame.SelectedTriggerEvents) ~= "table" then
+  triggerFrame.SelectedTriggerEvents = {};
+  local triggerData = MikSBT.CurrentProfile.Triggers[triggerFrame.TriggerKey];
+  local events = triggerData and triggerData.TriggerSettings and triggerData.TriggerSettings.TriggerEvents;
+  if type(events) == "table" then
+   for _, triggerEvent in pairs(events) do triggerFrame.SelectedTriggerEvents[triggerEvent] = true; end
+  end
+ end
+ return triggerFrame.SelectedTriggerEvents;
+end
+
 function MikSBTOpt.SetupVariableTriggerControls(triggerKey, showSearch)
  -- Get the trigger configuration frame.
  local triggerFrame = getglobal(TRIGGER_CONFIGURATION_FRAME_NAME);
@@ -3553,14 +3571,14 @@ function MikSBTOpt.SetupVariableTriggerControls(triggerKey, showSearch)
    getglobal(TRIGGER_CONFIGURATION_FRAME_NAME .. "TextureHorizontalBarBottom"):Show();
 
    -- Clear the selected trigger events.
-   if (not triggerFrame.SelectedTriggerEvents) then
+   if (type(triggerFrame.SelectedTriggerEvents) ~= "table") then
     triggerFrame.SelectedTriggerEvents = {};
    else
     MikCEH.EraseTable(triggerFrame.SelectedTriggerEvents);
    end
 
    -- Loop through all of the trigger events for the trigger.
-   for  _, triggerEvent in triggerData.TriggerSettings.TriggerEvents do
+   for  _, triggerEvent in pairs(triggerData.TriggerSettings.TriggerEvents or {}) do
     triggerFrame.SelectedTriggerEvents[triggerEvent] = true;
    end
 
@@ -3695,7 +3713,7 @@ function MikSBTOpt.SaveTriggerConfig()
    triggerData.TriggerSettings.Threshold = nil;
 
    local trigEvents = {};
-   for triggerEvent in triggerFrame.SelectedTriggerEvents do
+   for triggerEvent in pairs(MikSBTOpt.EnsureSelectedTriggerEvents(triggerFrame)) do
     table.insert(trigEvents, triggerEvent);
    end
 

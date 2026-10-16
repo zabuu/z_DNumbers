@@ -24,6 +24,12 @@ widget=function(...)
  function w:GetChecked() return self.checked end
  function w:EnableMouse() end
  function w:RegisterForDrag() end
+ function w:GetScript(k) return self.scripts[k] end
+ function w:GetHighlightTexture() return nil end
+ function w:GetFontString()
+  if not self.caption then self.caption=widget("FontString",self) end
+  return self.caption
+ end
  return w
 end
 petX=.8; petY=.212; petAvailable=true; petProjects=0
@@ -39,6 +45,9 @@ end
 petNativeAPI=zAPI
 MikSBT.RegisterOutgoingNameplateHandler=function(f,enabled,resolver) outgoing=f; hintResolver=resolver end
 function emit(guid,pet,crit,text,result)
+ -- The retained target-orbit renderer is explicitly selectable; newer installs
+ -- default to the separate over-pet record covered by test_pet_anchor.py.
+ zDNumbers.config.pet_anchor="TARGET"
  outgoing({TargetGUID=guid,Name=UnitName(guid),Amount=100,Text=text or "100",Texture="source.blp",IsBlocked=result,IsCrit=crit,
   EventType=pet and "MSBT_EVENTTYPE_OUTGOING_PET_DAMAGE" or "MSBT_EVENTTYPE_OUTGOING_DAMAGE",
   ScrollArea={},EventSettings={FontSettings={Color={r=1,g=1,b=1}}}})
@@ -275,19 +284,16 @@ SlashCmdList={}; getglobal=function(n) return named[n] end
 zDNumbers.Refresh=function() if zDNumbers.options then zDNumbers.options:Refresh() end end
 zDNumbers.GetAttachedCount=function() return 0 end
 ''')
+lua.execute((root / "suite_ui.lua").read_text(encoding="utf-8-sig"))
 lua.execute((root / "options.lua").read_text(encoding="utf-8-sig"))
 lua.execute('''
 zDNumbers.options:Refresh()
-local checkbox,hint
-for _,w in ipairs(widgets) do
- if w.kind=="CheckButton" and w.SetPointArgs[5]==-112 then checkbox=w end
- if w.kind=="FontString" and w.text=="Position: level orbit toward your pet (automatic)" then hint=w end
- assert(not (w.kind=="Button" and w.SetPointArgs and w.SetPointArgs[5]==-144))
-end
-assert(checkbox and hint and hint.alpha==.45)
+local checkbox
+for _,w in ipairs(zDNumbers.settingsControls) do if w.key=="split_pet" then checkbox=w.control end end
+assert(checkbox)
 this=checkbox; this.checked=true; this.scripts.OnClick()
-assert(zDNumbers.config.split_pet=="1" and hint.alpha==1)
+assert(zDNumbers.config.split_pet=="1")
 this=checkbox; this.checked=false; this.scripts.OnClick()
-assert(zDNumbers.config.split_pet=="0" and hint.alpha==.45)
+assert(zDNumbers.config.split_pet=="0")
 ''')
 print("Pet streams: level legacy fallback, compact separation/dead zone, shared pet projection, independent pools/spacing, source routing, previews, UI and death/recycling passed.")

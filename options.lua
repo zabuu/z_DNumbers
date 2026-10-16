@@ -1,212 +1,144 @@
-local Z = zDNumbers
-
-local frame = CreateFrame("Frame", "zDNumbersOptions", UIParent)
-frame:SetWidth(500)
-frame:SetHeight(615)
-frame:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
-frame:SetFrameStrata("DIALOG")
-frame:SetMovable(true)
-frame:EnableMouse(true)
-frame:RegisterForDrag("LeftButton")
-frame:SetScript("OnDragStart", function() this:StartMoving() end)
-frame:SetScript("OnDragStop", function() this:StopMovingOrSizing() end)
-frame:SetBackdrop({ bgFile="Interface\\DialogFrame\\UI-DialogBox-Background", edgeFile="Interface\\DialogFrame\\UI-DialogBox-Border", tile=true, tileSize=32, edgeSize=32, insets={left=11,right=12,top=12,bottom=11} })
-frame:SetBackdropColor(.03, .03, .03, .94)
-frame:Hide()
-
-local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-title:SetPoint("TOP", frame, "TOP", 0, -20)
-title:SetText("zDNumbers")
-local subtitle = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-subtitle:SetPoint("TOP", title, "BOTTOM", 0, -6)
-subtitle:SetText("MSBT damage attached to visible nameplates")
-
-local closeX = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
-closeX:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -4, -4)
-
-local controls = {}
-local function Label(text, y)
-  local label = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  label:SetPoint("TOPLEFT", frame, "TOPLEFT", 40, y)
-  label:SetWidth(270)
-  label:SetJustifyH("LEFT")
-  label:SetText(text)
-  return label
-end
-
-local function SetValue(key, value)
-  if not Z.config then return end
-  Z.config[key] = tostring(value)
-  Z.Refresh()
-end
-
-local enabled = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-enabled:SetPoint("TOPLEFT", frame, "TOPLEFT", 35, -82)
-enabled:SetWidth(24); enabled:SetHeight(24)
-Label("Attach outgoing MSBT damage to nameplates", -82)
-enabled:SetScript("OnClick", function() SetValue("enabled", this:GetChecked() and "1" or "0") end)
-controls.enabled = enabled
-
-local splitPet = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-splitPet:SetPoint("TOPLEFT", frame, "TOPLEFT", 35, -112)
-splitPet:SetWidth(24); splitPet:SetHeight(24)
-local splitLabel = Label("Split pet damage into a separate stream", -115)
-splitLabel:SetPoint("TOPLEFT", frame, "TOPLEFT", 65, -115)
-splitLabel:SetWidth(360)
-splitPet:SetScript("OnClick", function() SetValue("split_pet", this:GetChecked() and "1" or "0") end)
-controls.splitPet = splitPet
-
-local petDirectionHint = Label("Position: level orbit toward your pet (automatic)", -148)
-petDirectionHint:SetPoint("TOPLEFT", frame, "TOPLEFT", 65, -148)
-petDirectionHint:SetWidth(360)
-petDirectionHint:SetTextColor(.7, .75, .8)
-controls.petDirectionHint = petDirectionHint
-
-local icons = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
-icons:SetPoint("TOPLEFT", frame, "TOPLEFT", 35, -180)
-icons:SetWidth(24); icons:SetHeight(24)
-Label("Show subtle spell and attack source icons", -180)
-icons:SetScript("OnClick", function() SetValue("icons", this:GetChecked() and "1" or "0") end)
-controls.icons = icons
-
-local opacityLabel = Label("Icon opacity: 30%", -217)
-local opacity = CreateFrame("Slider", "zDNumbersIconOpacitySlider", frame, "OptionsSliderTemplate")
-opacity:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -212)
-opacity:SetWidth(160)
-opacity:SetHeight(16)
-opacity:SetMinMaxValues(0, 100)
-opacity:SetValueStep(1)
-if getglobal then
-  local low = getglobal("zDNumbersIconOpacitySliderLow")
-  local high = getglobal("zDNumbersIconOpacitySliderHigh")
-  local text = getglobal("zDNumbersIconOpacitySliderText")
-  if low then low:SetText("0%") end
-  if high then high:SetText("100%") end
-  if text then text:SetText("") end
-end
-opacity:SetScript("OnValueChanged", function()
-  local value = math.floor((tonumber(arg1) or this:GetValue() or 30) + .5)
-  opacityLabel:SetText("Icon opacity: " .. value .. "%")
-  if not this.zDNumbersUpdating then SetValue("icon_opacity", value) end
-end)
-controls.iconOpacity = opacity
-controls.iconOpacityLabel = opacityLabel
-
-local tiltLabel = Label("Perspective depth: 12%", -255)
-local tilt = CreateFrame("Slider", "zDNumbersPerspectiveTiltSlider", frame, "OptionsSliderTemplate")
-tilt:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -250)
-tilt:SetWidth(160)
-tilt:SetHeight(16)
-tilt:SetMinMaxValues(0, 100)
-tilt:SetValueStep(1)
-if getglobal then
-  local low = getglobal("zDNumbersPerspectiveTiltSliderLow")
-  local high = getglobal("zDNumbersPerspectiveTiltSliderHigh")
-  local text = getglobal("zDNumbersPerspectiveTiltSliderText")
-  if low then low:SetText("Off") end
-  if high then high:SetText("Extreme") end
-  if text then text:SetText("") end
-end
-tilt:SetScript("OnValueChanged", function()
-  local value = math.floor((tonumber(arg1) or this:GetValue() or 12) + .5)
-  tiltLabel:SetText(value == 0 and "Perspective depth: Off"
-    or value >= 75 and "Perspective depth: EXTREME (" .. value .. "%)"
-    or "Perspective depth: " .. value .. "%")
-  if not this.zDNumbersUpdating then SetValue("perspective_tilt", value) end
-end)
-controls.perspectiveTilt = tilt
-controls.perspectiveTiltLabel = tiltLabel
-
-local fields = {
-  { "Horizontal offset", "x" },
-  { "Vertical offset above health bar", "y" },
-  { "Scroll-area width", "width" },
-  { "Scroll height / travel distance", "height" },
-  { "Seconds before text begins fading", "fade" },
+local Z, UI = zDNumbers, zDNumbers.UI
+local frame=UI.Window("zDNumbersOptions","zDNumbers","z suite  /  Settings apply immediately")
+local pages={
+  {name="Placement",description="Camera-aware outgoing damage attached to the world.",items={
+    {"check","Attach outgoing damage to nameplates","enabled"},
+    {"section","Position & travel"},
+    {"slider","Horizontal offset","x",-300,300,1," px"},
+    {"slider","Height above the health bar","y",-100,300,1," px"},
+    {"slider","Scroll-area width","width",20,500,1," px"},
+    {"slider","Scroll height / travel distance","height",10,600,1," px"},
+    {"slider","Delay before fading","fade",0,10,.05," sec",2},
+  }},
+  {name="Appearance",description="Icons, alignment and perspective. MSBT controls fonts and event colours.",items={
+    {"check","Show spell and attack source icons","icons"},
+    {"slider","Source-icon opacity","icon_opacity",0,100,1,"%"},
+    {"slider","Perspective depth","perspective_tilt",0,100,1,"%"},
+    {"select","Text alignment","align",{{"Left","LEFT"},{"Centre","CENTER"},{"Right","RIGHT"}}},
+    {"note","Source icons retain their rounded edges and padding. Block, parry and glancing-result icons remain enabled."},
+    {"note","Perspective changes world-space travel and glyph shaping; text remains camera-horizontal."},
+  }},
+  {name="Pet damage",description="Keep pet damage near its source instead of crowding the target.",items={
+    {"check","Split pet damage into a separate stream","split_pet"},
+    {"select","Pet damage anchor","pet_anchor",{{"Over the pet","PET"},{"Beside target (legacy)","TARGET"}}},
+    {"slider","Forward distance past the pet","pet_forward",0,3,.05," yd",2},
+    {"note","Pet damage rises above the pet's nose, independently of enemy nameplates. Off-screen pets use the normal MSBT Pet Outgoing screen area."},
+    {"note","Pet fonts, colours, crit sizing, filters and merge rules still come from MSBT. Turning this off restores the combined target stream."},
+  }},
+  {name="MSBT",description="The complete embedded MSBT editor, styled to match the z suite.",items={
+    {"note","All original MSBT controls are retained: profiles, fonts, incoming and outgoing events, notifications, triggers, suppressions and scroll-area positioning."},
+    {"action","Open MSBT settings",function() Z.EnsureEmbeddedMSBT(); if MSBTFrameOptions then MSBTFrameOptions:Show() end end},
+    {"note","Use the MSBT scroll-area mover to position the static fallback for off-screen pet damage. Your existing MSBT profile is preserved."},
+  }},
 }
-for i = 1, table.getn(fields) do
-  local y = -293 - (i - 1) * 36
-  Label(fields[i][1], y)
-  local key = fields[i][2]
-  local edit = CreateFrame("EditBox", nil, frame, "InputBoxTemplate")
-  edit:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, y + 5)
-  edit:SetWidth(105); edit:SetHeight(24)
-  edit:SetAutoFocus(false)
-  edit:SetTextColor(1, 1, 1, 1)
-  edit:SetScript("OnEditFocusGained", function() this.zDNumbersEditing = true end)
-  edit:SetScript("OnEnterPressed", function() SetValue(key, this:GetText()); this:ClearFocus() end)
-  edit:SetScript("OnEscapePressed", function() this:SetText(Z.config[key] or ""); this:ClearFocus() end)
-  edit:SetScript("OnEditFocusLost", function()
-    this.zDNumbersEditing = nil
-    SetValue(key, this:GetText())
-  end)
-  controls[key] = edit
+local controls,tabs,active={},{},1
+Z.settingsPages=pages
+local title=UI.Text(frame,"",178,-60,600,true)
+local description=UI.Text(frame,"",178,-82,600); description:SetTextColor(unpack(UI.colors.muted))
+local scroll=CreateFrame("ScrollFrame","zDNumbersSettingsScroll",frame,"UIPanelScrollFrameTemplate")
+scroll:SetPoint("TOPLEFT",frame,"TOPLEFT",170,-110); scroll:SetPoint("BOTTOMRIGHT",frame,"BOTTOMRIGHT",-30,58)
+local content=CreateFrame("Frame",nil,scroll); content:SetWidth(620); content:SetHeight(1); scroll:SetScrollChild(content)
+local divider=frame:CreateTexture(nil,"ARTWORK")
+divider:SetTexture("Interface\\BUTTONS\\WHITE8X8"); divider:SetVertexColor(.35,.4,.5,.25)
+divider:SetPoint("TOPLEFT",frame,"TOPLEFT",158,-56); divider:SetPoint("BOTTOMLEFT",frame,"BOTTOMLEFT",158,52); divider:SetWidth(1)
+local function SetValue(key,value)
+  if not Z.config or tostring(Z.config[key])==tostring(value) then return end
+  Z.config[key]=tostring(value); Z.Refresh()
 end
-
-Label("Text alignment", -475)
-local align = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-align:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -42, -472)
-align:SetWidth(105); align:SetHeight(23)
-align:SetScript("OnClick", function()
-  local current = Z.config.align or "CENTER"
-  local nextValue = current == "LEFT" and "CENTER" or current == "CENTER" and "RIGHT" or "LEFT"
-  SetValue("align", nextValue)
+local function OpenPage(index)
+  active=index; local page=pages[index]; title:SetText(page.name); description:SetText(page.description)
+  local y=0
+  for _,widget in ipairs(controls) do
+    if widget.page==index then
+      widget.row:ClearAllPoints(); widget.row:SetPoint("TOPLEFT",content,"TOPLEFT",0,-y); widget.row:Show(); y=y+widget.height
+    else widget.row:Hide() end
+  end
+  content:SetHeight(math.max(1,y)); scroll:SetVerticalScroll(0)
+  for i,tab in ipairs(tabs) do tab:SetBackdropColor(i==index and .08 or .045,i==index and .22 or .06,i==index and .23 or .08,1) end
+end
+for pageIndex,page in ipairs(pages) do
+  local index=pageIndex
+  local tab=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
+  tab:SetPoint("TOPLEFT",frame,"TOPLEFT",14,-64-(index-1)*30); tab:SetWidth(136); tab:SetHeight(26)
+  tab:SetText(page.name); UI.Button(tab); tabs[index]=tab
+  tab:SetScript("OnClick",function() OpenPage(index); frame:Refresh() end)
+  for _,definition in ipairs(page.items) do
+    local item=definition -- Private binding for legacy Lua closures.
+    local kind,text,key=item[1],item[2],item[3]
+    local row=CreateFrame("Frame",nil,content)
+    local height=kind=="slider" and 40 or kind=="note" and 64 or 32
+    row:SetWidth(620); row:SetHeight(height)
+    local widget={page=index,row=row,height=height,key=key,kind=kind}; table.insert(controls,widget)
+    if kind=="check" then
+      local control=CreateFrame("CheckButton",nil,row,"UICheckButtonTemplate")
+      control:SetWidth(22); control:SetHeight(22); control:SetPoint("TOPLEFT",row,"TOPLEFT",8,-3)
+      UI.Text(row,text,35,-8,575)
+      control:SetScript("OnClick",function() SetValue(key,this:GetChecked() and "1" or "0") end); widget.control=control
+    elseif kind=="slider" then
+      UI.Text(row,text,8,-7,295)
+      local name="zDNumbersSettingSlider"..table.getn(controls)
+      local control=CreateFrame("Slider",name,row,"OptionsSliderTemplate")
+      control:SetPoint("TOPLEFT",row,"TOPLEFT",320,-6); control:SetWidth(175); control:SetHeight(16)
+      control:SetMinMaxValues(item[4],item[5]); control:SetValueStep(item[6])
+      for _,suffix in ipairs({"Low","High","Text"}) do
+        local region=getglobal(name..suffix)
+        if region then region:SetText(suffix=="Low" and item[4]..item[7] or suffix=="High" and item[5]..item[7] or "") end
+      end
+      local input=UI.Input(row); input:SetWidth(85); input:SetHeight(24); input:SetPoint("TOPRIGHT",row,"TOPRIGHT",-8,-2)
+      input:SetScript("OnEditFocusGained",function() this.editing=true end)
+      local function SaveNumber(value)
+        local number=tonumber(value)
+        if not number then frame:Refresh(); return end
+        number=math.max(item[4],math.min(item[5],number)); number=math.floor(number/item[6]+.5)*item[6]
+        SetValue(key,string.format("%."..(item[8] or 0).."f",number))
+      end
+      control:SetScript("OnValueChanged",function() if not frame.updating then SaveNumber(arg1 or this:GetValue()) end end)
+      input:SetScript("OnEnterPressed",function() SaveNumber(this:GetText()); this:ClearFocus() end)
+      input:SetScript("OnEscapePressed",function() this:SetText(Z.config[key]); this:ClearFocus(); frame:Refresh() end)
+      input:SetScript("OnEditFocusLost",function() this.editing=nil; if not frame.updating then SaveNumber(this:GetText()) end end)
+      widget.control,widget.input=control,input; widget.format="%."..(item[8] or 0).."f"
+    elseif kind=="select" then
+      UI.Text(row,text,8,-7,295)
+      widget.control=UI.Select(row,item[4],function() return Z.config and Z.config[key] end,function(value) SetValue(key,value) end)
+      widget.control:SetPoint("TOPRIGHT",row,"TOPRIGHT",-8,-2)
+    elseif kind=="action" then
+      local control=CreateFrame("Button",nil,row,"UIPanelButtonTemplate")
+      control:SetPoint("TOPLEFT",row,"TOPLEFT",8,-2); control:SetWidth(260); control:SetHeight(24)
+      control:SetText(text); UI.Button(control); control:SetScript("OnClick",key)
+    else
+      local label=UI.Text(row,text,8,-8,598,kind=="section")
+      if kind=="note" then label:SetTextColor(unpack(UI.colors.muted)) end
+    end
+  end
+end
+local status=UI.Text(frame,"",178,-510,580); status:SetTextColor(unpack(UI.colors.muted))
+local reset=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
+reset:SetPoint("BOTTOMLEFT",frame,"BOTTOMLEFT",14,14); reset:SetWidth(136); reset:SetHeight(24)
+reset:SetText("Reset defaults..."); UI.Button(reset)
+reset:SetScript("OnClick",function()
+  StaticPopupDialogs.ZDN_RESET={text="Reset zDNumbers placement and appearance? MSBT profiles are not changed.",
+    button1="Reset",button2="Cancel",OnAccept=function() Z.Reset() end,timeout=0,whileDead=1,hideOnEscape=1}
+  UI.RaiseDialog(StaticPopup_Show("ZDN_RESET"))
 end)
-controls.align = align
-
-local status = Label("", -512)
-status:SetWidth(420)
-controls.status = status
-
-local reset = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-reset:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 28, 24)
-reset:SetWidth(110); reset:SetHeight(25); reset:SetText("Reset defaults")
-reset:SetScript("OnClick", function() Z.Reset() end)
-
-local msbt = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-msbt:SetPoint("LEFT", reset, "RIGHT", 8, 0)
-msbt:SetWidth(110); msbt:SetHeight(25); msbt:SetText("MSBT options")
-msbt:SetScript("OnClick", function()
-  Z.EnsureEmbeddedMSBT()
-  if MikSBT and MikSBT.CommandHandler then MikSBT.CommandHandler("") end
-end)
-
-local close = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-close:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -28, 24)
-close:SetWidth(110); close:SetHeight(25); close:SetText("Close")
-close:SetScript("OnClick", function() frame:Hide() end)
-
+local msbt=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
+msbt:SetPoint("BOTTOMRIGHT",frame,"BOTTOMRIGHT",-14,14); msbt:SetWidth(140); msbt:SetHeight(24)
+msbt:SetText("MSBT settings"); UI.Button(msbt)
+msbt:SetScript("OnClick",function() Z.EnsureEmbeddedMSBT(); if MSBTFrameOptions then MSBTFrameOptions:Show() end end)
 function frame:Refresh()
   if not Z.config then return end
-  controls.enabled:SetChecked(Z.config.enabled == "1")
-  controls.icons:SetChecked(Z.config.icons == "1")
-  local split = Z.config.split_pet == "1"
-  controls.splitPet:SetChecked(split)
-  controls.petDirectionHint:SetAlpha(split and 1 or .45)
-  local opacity = math.max(0, math.min(100, tonumber(Z.config.icon_opacity) or 30))
-  controls.iconOpacity.zDNumbersUpdating = true
-  controls.iconOpacity:SetValue(opacity)
-  controls.iconOpacity.zDNumbersUpdating = nil
-  controls.iconOpacityLabel:SetText("Icon opacity: " .. math.floor(opacity + .5) .. "%")
-  local tilt = math.max(0, math.min(100, tonumber(Z.config.perspective_tilt) or 12))
-  controls.perspectiveTilt.zDNumbersUpdating = true
-  controls.perspectiveTilt:SetValue(tilt)
-  controls.perspectiveTilt.zDNumbersUpdating = nil
-  controls.perspectiveTiltLabel:SetText(tilt == 0 and "Perspective depth: Off"
-    or tilt >= 75 and "Perspective depth: EXTREME ("
-      .. math.floor(tilt + .5) .. "%)"
-    or "Perspective depth: " .. math.floor(tilt + .5) .. "%")
-  for _, key in pairs({ "x", "y", "width", "height", "fade" }) do
-    if not controls[key].zDNumbersEditing then controls[key]:SetText(Z.config[key] or "") end
+  self.updating=true
+  for _,widget in ipairs(controls) do
+    if widget.kind=="check" then widget.control:SetChecked(Z.config[widget.key]=="1")
+    elseif widget.kind=="slider" then
+      local value=tonumber(Z.config[widget.key]) or tonumber(Z.defaults[widget.key]) or 0
+      widget.control:SetValue(value)
+      if not widget.input.editing then widget.input:SetText(string.format(widget.format,value)) end
+    elseif widget.kind=="select" then widget.control:Refresh() end
   end
-  controls.align:SetText(Z.config.align or "CENTER")
-  local runtime = MikSBT and MikSBT.CurrentProfile and "|cff55ff55MSBT ready|r" or "|cffff5555MSBT unavailable|r"
-  controls.status:SetText(runtime .. "  •  " .. Z.GetAttachedCount() .. " visible nameplate(s) attached")
+  self.updating=nil
+  status:SetText((MikSBT and MikSBT.CurrentProfile and "MSBT ready" or "MSBT unavailable").."  /  "..Z.GetAttachedCount().." visible plates")
 end
-
-frame:SetScript("OnShow", function() frame:Refresh() end)
-Z.options = frame
-
-SLASH_ZDNUMBERS1 = "/zdn"
-SLASH_ZDNUMBERS2 = "/zdnumbers"
-SlashCmdList["ZDNUMBERS"] = function() if frame:IsShown() then frame:Hide() else frame:Show() end end
+frame:SetScript("OnShow",function() OpenPage(active); frame:Refresh() end)
+Z.options,Z.settingsControls=frame,controls
+SLASH_ZDNUMBERS1="/zdn"; SLASH_ZDNUMBERS2="/zdnumbers"
+SlashCmdList.ZDNUMBERS=function() if frame:IsShown() then frame:Hide() else frame:Show() end end

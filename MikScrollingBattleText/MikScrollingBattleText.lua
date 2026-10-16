@@ -349,6 +349,16 @@ function MikSBT.OnUpdate()
    stillMerging = false;
   end
  end
+
+ -- Drive only active scroll areas from the already-running event frame.
+ -- Display parents stay shown with transparent idle text, avoiding native
+ -- frame activation on each isolated hit, notification, or buff transition.
+ for _, scrollArea in scrollAreas do
+  if scrollArea.AnimationsActive then
+   local frame = scrollArea.Frame or getglobal(scrollArea.AssociatedFrame);
+   if frame:IsVisible() then MikSBT.OnUpdateAnimationFrame(frame); end
+  end
+ end
 end
 
 
@@ -386,16 +396,13 @@ function MikSBT.OnUpdateAnimationFrame(frame)
    -- Do the animation and clear the all inactive flag.
    if not currentTime then currentTime = GetTime(); end
    MikSBT.DoAnimation(animDisplayInfo, scrollArea, currentTime);
-   allInactive = false;
+   if animDisplayInfo.IsActive then allInactive = false; end
   end
  end
 
- -- Check if none of the animations are active and the events frame is visible.  If so, hide it so
- -- the OnUpdate events stop firing.  This is done to keep the number of OnUpdate events down to a minimum for
- -- better performance.
- if (allInactive and frame:IsVisible()) then
-  frame:Hide();
- end
+ -- Completed animations already have zero font/icon alpha. Leave the parent
+ -- shown and remove it from the active driver instead of hiding/showing it.
+ scrollArea.AnimationsActive = not allInactive;
 end
 
 
@@ -474,7 +481,6 @@ function MikSBT.SetupAnimationScrollAreas()
     local fontString = petFrame:CreateFontString(petFrameName .. "Text" .. x, "ARTWORK", "MasterFont");
     fontString:SetPoint("BOTTOMLEFT");
    end
-   petFrame:SetScript("OnUpdate", function() MikSBT.OnUpdateAnimationFrame(this); end);
   end
  end
 
@@ -488,7 +494,11 @@ function MikSBT.SetupAnimationScrollAreas()
 
  -- Loop through the scroll areas.
  for _, scrollArea in scrollAreas do
-  getglobal(scrollArea.AssociatedFrame).msbtScrollArea = scrollArea;
+  local frame = getglobal(scrollArea.AssociatedFrame);
+  frame.msbtScrollArea = scrollArea;
+  scrollArea.Frame = frame;
+  scrollArea.AnimationsActive = false;
+  frame:SetScript("OnUpdate", nil);
   -- Initialize the next available animation display object.
   scrollArea.NextAnimationDisplay = 1;
 
@@ -503,8 +513,11 @@ function MikSBT.SetupAnimationScrollAreas()
   for x = 1, NUM_FONT_STRINGS do
    scrollArea.AnimationDisplayArray[x] = {};
    scrollArea.AnimationDisplayArray[x].FontObject = getglobal(scrollArea.AssociatedFrame .. "Text" .. x);
+   scrollArea.AnimationDisplayArray[x].FontObject:SetAlpha(0);
    scrollArea.AnimationDisplayArray[x].LastUpdated = 0;
   end
+  -- Warm the native display once during initialization, before combat text.
+  if not (frame.IsShown and frame:IsShown() or frame:IsVisible()) then frame:Show(); end
  end
 end
 
@@ -1224,6 +1237,9 @@ function MikSBT.FormatEventText(animationEvent)
 
  -- Set the event's output text.
  animationEvent.Text = outputString;
+ -- AddAnimation immediately needs this same lookup for class coloring.
+ -- Return even a miss so it does not scan the whole roster a second time.
+ return unitID, unitName, true;
 end
 
 
@@ -1795,22 +1811,26 @@ end
 function MikSBT.AddAnimation(animationEvent)
  local perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Format the animation event's output text.
- MikSBT.FormatEventText(animationEvent);
+ local unitID, uName, nameResolved = MikSBT.FormatEventText(animationEvent);
  if started then perf.EndOperation("MSBT text formatting", started, generation, animationEvent.Text, trigger); end
 
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Loop through all of the suppression entries and look for a match.
  for _, suppressionSettings in MikSBT.CurrentProfile.Suppressions do
   -- Check if the suppression's search pattern is a match.
   if (suppressionSettings.Enabled and (string.find(animationEvent.Text, suppressionSettings.SearchPattern))) then
+   if started then perf.EndOperation("MSBT suppression checks", started, generation, animationEvent.Text, trigger); end
    -- Reclaim the animation event table to the events recycler and leave the function.
    eventsRecycler:ReclaimTable(animationEvent);
    return;
   elseif (suppressionSettings.Enabled and animationEvent.EffectName and string.find(animationEvent.EffectName, suppressionSettings.SearchPattern)) then
+   if started then perf.EndOperation("MSBT suppression checks", started, generation, animationEvent.EffectName, trigger); end
    -- Reclaim the animation event table to the events recycler and leave the function.
    eventsRecycler:ReclaimTable(animationEvent);
    return;
   end
  end
+ if started then perf.EndOperation("MSBT suppression checks", started, generation, animationEvent.Text, trigger); end
  
  if animationEvent.EventType == "MSBT_EVENTTYPE_NOTIFICATION_POWER_GAIN" and animationEvent.EffectName ~= 0 and MikSBT.CurrentProfile.ShowAllManaGains then
   eventsRecycler:ReclaimTable(animationEvent);
@@ -1823,8 +1843,11 @@ function MikSBT.AddAnimation(animationEvent)
   animationEvent.IsSticky = true;
  end
 
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Color UnitName by class
- local unitID, uName = MikCEH.GetUnitIDFromName(animationEvent.Name)
+ -- Preformatted trigger text still resolves here; formatted text reuses the
+ -- result obtained just above, without retaining a stale cross-event cache.
+ if not nameResolved then unitID, uName = MikCEH.GetUnitIDFromName(animationEvent.Name); end
  if unitID then
 	local _, Class = UnitClass(unitID)
 	if Class and Class == "PALADIN" then
@@ -1847,7 +1870,9 @@ function MikSBT.AddAnimation(animationEvent)
 		animationEvent.Text = string.gsub(animationEvent.Text, animationEvent.Name, "|cffC79C6E|h"..uName.."|h|r")
 	end
  end
+ if started then perf.EndOperation("MSBT name coloring", started, generation, animationEvent.Name, trigger); end
 
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Get the next available animation display info object for the scroll area.
  local animDisplayInfo = MikSBT.GetNextAnimationDisplayInfo(animationEvent);
 
@@ -1897,6 +1922,7 @@ function MikSBT.AddAnimation(animationEvent)
  animDisplayInfo.AnchorPoint = MikSBT.AVAILABLE_TEXT_ALIGNS[animationEvent.ScrollArea.DisplaySettings.FontSettings.TextAlignIndex].AnchorPoint;
  animDisplayInfo.IsCrit = animationEvent.IsCrit;
  animDisplayInfo.IsSticky = animationEvent.IsSticky;
+ if started then perf.EndOperation("MSBT display preparation", started, generation, animationEvent.Text, trigger); end
 
  if (animationEvent.EventType == "MSBT_EVENTTYPE_OUTGOING_SPELL_RESIST") then 
   -- play sound if enabled
@@ -1954,25 +1980,29 @@ function MikSBT.AddAnimation(animationEvent)
   animDisplayInfo.Texture:SetTexCoord(0.125, 0.875, 0.125, 0.875)
   animDisplayInfo.Texture:SetPoint("RIGHT", animDisplayInfo.FontObject, "LEFT", -4, 0);
   animDisplayInfo.Texture:SetDrawLayer(animDisplayInfo.IsSticky and "OVERLAY" or animDisplayInfo.IsCrit and "OVERLAY" or "ARTWORK");
+  animDisplayInfo.Texture:SetAlpha(animDisplayInfo.Alpha);
+  animDisplayInfo.appliedTextureAlpha, animDisplayInfo.alphaTexture = animDisplayInfo.Alpha, animDisplayInfo.Texture;
  elseif animDisplayInfo.Texture then
 	animDisplayInfo.Texture:SetTexture(nil);
  end
  if started then perf.EndOperation("MSBT icon rendering", started, generation, texture or animationEvent.Text, trigger); end
  
 
+ perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Set the last update to the current time.
  animDisplayInfo.LastUpdated = GetTime();
  animDisplayInfo.StartTime = animDisplayInfo.LastUpdated;
 
  -- Set the active flag.
  animDisplayInfo.IsActive = true;
+ animationEvent.ScrollArea.AnimationsActive = true;
 
 
- -- Check if the scroll area's display frame is not visible and make it visible so the OnUpdate events start firing.
- -- This is done to keep the number of OnUpdate events down to a minimum for better performance.
- if (not getglobal(animationEvent.ScrollArea.AssociatedFrame):IsVisible()) then
-  getglobal(animationEvent.ScrollArea.AssociatedFrame):Show();
- end
+ -- Recover an explicitly hidden parent; ordinary idle areas are already warm.
+ -- IsShown also avoids repeated Show calls while UIParent itself is hidden.
+ local frame = animationEvent.ScrollArea.Frame or getglobal(animationEvent.ScrollArea.AssociatedFrame);
+ if not (frame.IsShown and frame:IsShown() or frame:IsVisible()) then frame:Show(); end
+ if started then perf.EndOperation("MSBT display activation", started, generation, animationEvent.Text, trigger); end
 
  perf, started, generation, trigger = BeginMSBTMeasurement();
  -- Check if it's a sticky or a crit and sticky crits are enabled.
@@ -2884,6 +2914,10 @@ function MikSBT.CommandHandler(params)
   showUsage = false;
 
  elseif (currentParam == MikSBT.COMMAND_STATS) then
+  if remainingParams and string.lower(remainingParams) == "memory" then
+   eventsRecycler.TrackMemory = not eventsRecycler.TrackMemory;
+   MikSBT.Print("Recycler memory sampling " .. (eventsRecycler.TrackMemory and "enabled" or "disabled"), 1, 1, 1);
+  end
   -- Print out stats about the event recycler.
   eventsRecycler:PrintStats();
 
@@ -2995,8 +3029,10 @@ function MikSBT.RouteOutgoingNameplateEvent(animationEvent)
  if (not MikSBT.IsOutgoingNameplateHandlerActive()) then return false; end
  if (not MikSBT.IsOutgoingNameplateEvent(animationEvent)) then return false; end
 
- local ok = pcall(outgoingNameplateHandler, animationEvent);
- if (not ok) then return false; end
+ local ok, consumed = pcall(outgoingNameplateHandler, animationEvent);
+ -- An explicit refusal preserves MSBT's normal screen animation and ownership
+ -- (for example pet damage when its source is outside the camera viewport).
+ if (not ok or consumed == false) then return false; end
  eventsRecycler:ReclaimTable(animationEvent);
  return true;
 end

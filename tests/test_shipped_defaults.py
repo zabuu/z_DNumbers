@@ -1,5 +1,7 @@
 """Fresh accounts/characters inherit Zabbu's preset; existing saves stay intact."""
 from pathlib import Path
+import hashlib
+import os
 from lupa.lua51 import LuaRuntime, lua_type
 
 root = Path(__file__).resolve().parents[1]
@@ -8,6 +10,8 @@ localization = (root / "MikScrollingBattleText/localization.lua").read_text(enco
 # pre-existing font-path loop. Adapt only the test harness, not the shipped code.
 localization = localization.replace("for _, fontInfo in MikSBT.AVAILABLE_FONTS do", "for _, fontInfo in pairs(MikSBT.AVAILABLE_FONTS) do")
 preset = (root / "default_profile.lua").read_text(encoding="utf-8-sig")
+# The captured factory profile is immutable; the player's live saves are not.
+assert hashlib.sha256(preset.encode()).hexdigest() == "3d8e91828a58ab4cd65a522672b542aa3f2692971fef657720ebd1303c240615"
 
 def runtime(locale="enUS"):
     lua = LuaRuntime(unpack_returned_tuples=True)
@@ -99,17 +103,17 @@ def plain(value):
 # supported attachment setting to the captured character, not just a sample.
 account = Path("G:/Games/OctoWoW/WTF/Account/ZABUU/SavedVariables/z_DNumbers.lua")
 character = Path("G:/Games/OctoWoW/WTF/Account/ZABUU/N'Zoth/Zabbu/SavedVariables/z_DNumbers.lua")
-if account.exists() and character.exists():
+if os.environ.get("ZDN_VERIFY_LIVE_PRESET") == "1" and account.exists() and character.exists():
     saved = LuaRuntime(unpack_returned_tuples=True)
     saved.execute(account.read_text(encoding="utf-8-sig"))
     save = saved.globals().MikSBT_Save
     assert plain(runtime().globals().MikSBT.DEFAULT_CONFIG) == plain(save.Profiles[save.CurrentProfile])
     saved.execute(character.read_text(encoding="utf-8-sig"))
     for key, value in lua.globals().zDNumbers.defaults.items():
-        if key not in {"split_pet", "pet_side"}:  # New opt-in controls were not in the captured preset.
+        if key not in {"split_pet", "pet_side", "pet_anchor", "pet_forward"}:  # Added after the captured preset.
             assert value == saved.globals().zDNumbersDB[key], key
 
 toc = (root / "z_DNumbers.toc").read_text(encoding="utf-8-sig")
 assert toc.index("default_profile.lua") < toc.index("MikScrollingBattleText\\localization.lua")
 assert (root / "MikScrollingBattleText/Fonts/Expressway.ttf").is_file()
-print("Zabbu defaults: exact saved-profile match, fresh initialization, existing-save preservation, isolated copies, and locale-safe fonts passed.")
+print("Captured Zabbu factory preset: unchanged checksum, fresh initialization, existing-save preservation, isolated copies, and locale-safe fonts passed.")

@@ -19,7 +19,7 @@ MikTRO.__index = MikTRO;
 -- **********************************************************************************
 -- Creates a recycler object.
 -- **********************************************************************************
-function MikTRO:NewRecyclerObject(maxEntries)
+function MikTRO:NewRecyclerObject(maxEntries, trackMemory)
  -- Create a table to use.
  local recyclerObject = {};
 
@@ -33,6 +33,9 @@ function MikTRO:NewRecyclerObject(maxEntries)
  recyclerObject.NumErased = 0;
  recyclerObject.NumReclaimed = 0;
  recyclerObject.AmountMemFreed = 0;
+ -- Global memory deltas are diagnostic estimates, not memory released by
+ -- clearing a table. Keep those two native queries out of every combat event.
+ recyclerObject.TrackMemory = trackMemory and true or false;
 
 
  -- Create a table to hold overflow entries.  If more tables are reclaimed
@@ -41,8 +44,9 @@ function MikTRO:NewRecyclerObject(maxEntries)
  -- in cache usage to still be optimized while not preventing garbage
  -- collection on the extra data once there are no other references to them.
  recyclerObject.OverflowCache = {};
- recyclerObject.OverflowNext = 0;
- setmetatable(recyclerObject.OverflowCache, {__mode = "v"});
+ -- Use the cached table itself as a weak key. Numeric weak-value slots leave
+ -- an ever-increasing index/hash footprint over repeated combat bursts.
+ setmetatable(recyclerObject.OverflowCache, {__mode = "k"});
 
 
  -- Set the meta table for the cache object to the table recycler
@@ -72,14 +76,13 @@ function MikTRO:AcquireTable()
  -- Check if there are any tables available in the overflow cache and if so
  -- return one.
  else
-  local index, cached = next(self.OverflowCache);
-  if index then
+  local cached = next(self.OverflowCache);
+  if cached then
    -- Increment the number of recycled tables.
    self.NumRecycled = self.NumRecycled + 1;
 
-   -- Weak values can leave holes. Removing by array position can shift or
-   -- miss another live entry; take the actual occupied slot directly.
-   self.OverflowCache[index] = nil;
+   -- Take this exact cached table; collection may remove other entries.
+   self.OverflowCache[cached] = nil;
    return cached;
   end
 
@@ -106,8 +109,7 @@ function MikTRO:ReclaimTable(t)
  -- Check if the primary cache is already full.
  if (table.getn(self.PrimaryCache) >= self.MaxEntries) then
   -- Insert the table into the overflow cache.
-  self.OverflowNext = self.OverflowNext + 1;
-  self.OverflowCache[self.OverflowNext] = t;
+  self.OverflowCache[t] = true;
  else
   -- Insert the table into the primary cache.
   table.insert(self.PrimaryCache, t);
@@ -127,8 +129,15 @@ function MikTRO:EraseTable(t)
   return;
  end
 
- -- Get the amount of memory used before the clear.
- local currentMem = gcinfo();
+ local perf, started, generation, trigger;
+ if OctoPerf and OctoPerf.recording and OctoPerf.BeginOperation then
+  perf, trigger = OctoPerf, event;
+  started, generation = perf.BeginOperation();
+ end
+
+ -- Optional detailed diagnostics retain the original memory-delta counter.
+ local currentMem;
+ if self.TrackMemory then currentMem = gcinfo(); end
 
  -- Loop through all the keys in the table and clear it.
  for key in pairs(t) do
@@ -138,11 +147,13 @@ function MikTRO:EraseTable(t)
  -- Set the length of the table to 0.
  table.setn(t, 0);
 
- -- Increment the amount of memory freed.
- self.AmountMemFreed = self.AmountMemFreed + math.abs(gcinfo() - currentMem);
+ if currentMem then
+  self.AmountMemFreed = self.AmountMemFreed + math.abs(gcinfo() - currentMem);
+ end
 
  -- Incremnt the number of tables erased.
  self.NumErased = self.NumErased + 1;
+ if started then perf.EndOperation("MSBT table clearing", started, generation, nil, trigger); end
 end
 
 
@@ -156,14 +167,19 @@ function MikTRO:PrintStats()
  end
 
  DEFAULT_CHAT_FRAME:AddMessage(string.format(
-  "|cff00ff00New Tables: %d|r  |cffffff00Recycled Tables: %d|r  |cff00ffffCached Tables: %d|r  |cffff0000Overflow Tables: %d|r  |cff888888Erased Tables: %d|r  |cffff00ffMemory Saved: %d KiB|r  |cffff0088Tables Lost to GC: %d",
+  "|cff00ff00New Tables: %d|r  |cffffff00Recycled Tables: %d|r  |cff00ffffCached Tables: %d|r  |cffff0000Overflow Tables: %d|r  |cff888888Erased Tables: %d|r  |cffff00ffEstimated Table Reuse: %.1f KiB|r  |cffff0088Tables Lost to GC: %d",
   self.NumNew,
   self.NumRecycled,
   table.getn(self.PrimaryCache),
   overflowSize,
   self.NumErased,
-  self.AmountMemFreed + ((32/1024) * self.NumRecycled),
-  self.NumReclaimed - self.NumRecycled - table.getn(self.PrimaryCache)));
+  (32/1024) * self.NumRecycled,
+  self.NumReclaimed - self.NumRecycled - table.getn(self.PrimaryCache) - overflowSize));
+ if self.TrackMemory or self.AmountMemFreed > 0 then
+  DEFAULT_CHAT_FRAME:AddMessage(string.format(
+   "Recycler memory sampling %s; observed absolute clear delta: %.1f KiB (global Lua memory, including collection)",
+   self.TrackMemory and "on" or "off", self.AmountMemFreed));
+ end
 end
 
 

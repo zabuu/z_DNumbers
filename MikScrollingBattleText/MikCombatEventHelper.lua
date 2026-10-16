@@ -297,6 +297,14 @@ end
 -- **********************************************************************************
 -- Called when the events the helper registered for occur.
 -- **********************************************************************************
+local function BeginCombatMeasurement()
+ local perf = OctoPerf;
+ if perf and perf.recording and perf.BeginOperation then
+  local started, generation = perf.BeginOperation();
+  return perf, started, generation, event;
+ end
+end
+
 function MikCEH.OnEvent()
  -- When an addon is loaded.
  if (event == "ADDON_LOADED") then
@@ -374,8 +382,12 @@ function MikCEH.OnEvent()
 
  -- Chat message combat events.
  else
+  local perf, started, generation, trigger = BeginCombatMeasurement();
   MikCEH.ParseSearchPatternTriggers(event, arg1);
+  if started then perf.EndOperation("MSBT trigger matching", started, generation, arg1, trigger); end
+  perf, started, generation, trigger = BeginCombatMeasurement();
   MikCEH.ParseCombatEvents(event, arg1);
+  if started then perf.EndOperation("MSBT combat parsing", started, generation, arg1, trigger); end
 
  end
 end
@@ -3766,7 +3778,9 @@ end
 function MikCEH.SendEvent(eventData)
  -- Make sure MSBT's combat events handler function is defined.
  if (MikSBT.CombatEventsHandler ~= nil) then
+  local perf, started, generation, trigger = BeginCombatMeasurement();
   MikSBT.CombatEventsHandler(eventData);
+  if started then perf.EndOperation("MSBT event dispatch", started, generation, eventData.EffectName, trigger); end
  end
 end
 

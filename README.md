@@ -14,7 +14,16 @@ nameplate replacement without addon-specific integration.
 - `/zdn` or `/zdnumbers` opens attachment, placement, alignment, and fade settings.
 - `/msbt` opens the embedded MSBT font, color, event, text, speed, and profile settings.
 - In `/zdn`, enable **Split pet damage into a separate stream**. It is off
-  by default, preserving the combined stream. Position is automatic: pet numbers
+  by default, preserving the combined stream. The default **Over the pet** anchor
+  places the stream over the pet's nose, using its own facing rather than the
+  enemy's nameplate. **Forward distance past the pet** adjusts this world offset.
+  Pet damage does not need a visible enemy or pet nameplate. Off-screen/missing
+  pets return new hits to the ordinary MSBT Pet Outgoing area. Already-visible
+  pet numbers transfer there once, then continue with MSBT's normal lifetime.
+  zAPI 2.2 supplies the exact forward anchor; older DLLs use the pet's head.
+  MSBT retains the fonts, colours, filters, formatting and crit settings.
+  The optional **Beside target (legacy)** mode retains the previous layout:
+  pet numbers
   orbit the main stream's starting point on a horizontal world plane, turning
   through 360 degrees toward your pet's X/Y position. Both streams start at the
   same world elevation; uphill/downhill pets do not tilt the ring. The camera
@@ -36,9 +45,28 @@ nameplate replacement without addon-specific integration.
   If neither is available, retain the last direction
   (right for a new stream or pet-less dummy preview). MSBT's pet fonts, colors,
   filters and event formatting still apply. zNameplates' **Dummy Damage!** also
-  pulses the pet lane while splitting is enabled, even without a real pet.
+  pulses the legacy target-side pet lane while splitting is enabled, even
+  without a real pet. Real pet combat uses the selected anchor.
 - Disable separate `MikScrollingBattleText` and `MikScrollingBattleTextOptions`
   addons while using zDNumbers; they are already included.
+
+## Settings windows
+
+`/zdn` uses the same compact, opaque dark surfaces and navigation rail as
+zNameplates. Placement, Appearance, Pet damage and MSBT pages retain all previous
+controls. Numeric settings have sliders plus precise entry, alignment has a
+dropdown, and resetting placement requires confirmation. Existing saved values
+and MSBT profiles are not migrated or overwritten by the UI refresh.
+
+The embedded `/msbt` editor retains its six original pages, event/message editors,
+font previews, profile operations, colour pickers, triggers, suppressions and
+five-area positioning/preview tool. Its original callbacks and data paths remain;
+only presentation, navigation and modal layering change. Missing local trigger
+selections recover from the saved trigger instead of throwing or losing events.
+
+The shared spacing, surfaces and selected states follow
+[Material layout guidance](https://m3.material.io/components/lists/overview).
+No external MSBT addon or zNameplates dependency is introduced.
 
 When upgrading from the combined zNameplates build, leave zNameplates enabled
 for the first login. zDNumbers lists it as an optional load-order dependency so
@@ -78,6 +106,15 @@ allocation for ordinary first-match searches. Burst queues compact once after
 merging, preserving late arrivals and the existing target, pet, crit and result
 rules. Empty merge ticks skip processing. Hidden/suppressed event records return
 to the recycler, whose weak overflow handles gaps left by collection.
+Overflow uses weak table identities rather than a lifetime sequence of numeric
+slots. Clearing event records no longer polls global Lua memory twice per
+event. `/msbt stats` retains pool counters and labels table reuse as an estimate;
+`/msbt stats memory` toggles detailed memory-delta sampling when explicitly
+needed. That diagnostic sampling starts off after reload.
+
+Formatted screen text reuses its name-resolution result for class coloring,
+halving roster searches for those messages. Preformatted notifications still
+resolve their names, and results are never cached across separate events.
 
 Scroll areas share one clock sample per animation frame. Sticky holds and
 unchanged font/icon geometry, opacity and anchor positions skip redundant UI
@@ -86,6 +123,13 @@ size workaround are preserved. Item-icon searches probe actual bag capacity,
 with the original fallback when slot counts are unavailable. Identical health
 or mana alert sounds play once per resource update while retaining all text
 notifications.
+
+Screen-text parents are warmed during initialization and stay shown with
+transparent text/icons while idle. The existing MSBT event frame drives only
+active scroll areas; idle areas have no separate animation callback. This
+avoids hiding and reactivating a native display for each isolated message, the
+path measured at 459 ms in the October 14 Falling capture. Explicitly hidden
+parents recover on new text, and hiding UIParent still hides the combat text.
 
 `tests/test_msbt_optimization.py` compares parsing, merging and 18 animation
 scenarios against a bundled pre-optimization baseline. Its work-count and
@@ -104,6 +148,8 @@ the perspective translation. Each pet number finds its nearest free gap along
 that direction using reusable, bounded collision intervals for individual
 numbers. There are no scene scans, per-number pet lookups or repeated native
 projections to fit the ring. Zipper ordering also uses reused slot arrays.
+Those orbit/zipper calculations are used only by the optional legacy anchor;
+the default over-pet stream shares one base projection across its active numbers.
 
 Rounded-icon geometry, font height, perspective setup, alignment and opacity
 are changed only when needed. Motion and fades still update every rendered
@@ -113,3 +159,8 @@ batch. MSBT formatting, merging, depth and profiles remain unchanged. The defaul
 combined stream retains ten slots; split mode allows ten per source, allocated
 only when used. Player/pet GUID hints are source-matched so equal simultaneous
 hits cannot steal each other's target.
+
+The factory-profile regression test checks the immutable captured preset rather
+than comparing against a player's subsequently edited live saves. To explicitly
+audit those saves against the original capture, run the test with
+`ZDN_VERIFY_LIVE_PRESET=1`; a mismatch does not mean saves were overwritten.

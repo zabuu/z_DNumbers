@@ -24,6 +24,7 @@ def vanilla_loops(source):
 
 HARNESS = '''
 now=0; writes=0; clocks=0; moves=0; iterators=0; memoryReads=0; messages={}; SlashCmdList={}
+shows=0; hides=0
 ceil=math.ceil; floor=math.floor; strlower=string.lower; gsub=string.gsub
 math.mod=math.fmod
 GetTime=function() clocks=clocks+1; return now end
@@ -65,13 +66,20 @@ function widget(name)
  function w:SetHeight(v) writes=writes+1; self.height=v end
  function w:SetFrameStrata() end
  function w:SetScript(k,fn) self.scripts[k]=fn end
- function w:Hide() self.shown=false end
- function w:Show() self.shown=true end
- function w:IsVisible() return self.shown end
+ function w:Hide() hides=hides+1; self.shown=false end
+ function w:Show() shows=shows+1; self.shown=true end
+ function w:IsShown() return self.shown end
+ function w:IsVisible() return self.shown and (not self.parent or self.parent:IsVisible()) end
+ function w:GetScript(k) return self.scripts[k] end
+ function w:ClearAllPoints() end
+ function w:SetFont(path,size,outline) self.path,self.size,self.outline=path,size,outline end
+ function w:SetTextColor(r,g,b) self.r,self.g,self.b=r,g,b end
+ function w:SetText(text) self.text=text end
+ function w:CreateTexture() local t=widget(); t.SetTexture=function(self,path) self.texture=path end; t.SetTexCoord=function() end; t.SetDrawLayer=function() end; return t end
  function w:CreateFontString(name) local f=widget(name); _G[name]=f; return f end
  return w
 end
-function CreateFrame(kind,name,parent) local f=widget(name); if name then _G[name]=f end; return f end
+function CreateFrame(kind,name,parent) local f=widget(name); f.parent=parent; if name then _G[name]=f end; return f end
 UIParent=widget('UIParent')
 for _,name in ipairs({'MSBTFrameIncoming','MSBTFrameOutgoing','MSBTFrameNotification'}) do
  _G[name]=widget(name)
@@ -342,7 +350,7 @@ print("PASS: 20-animation frame clocks 40 -> 1; empty merge calls 4 -> 0; bag pr
 # Hidden notifications recycle instead of allocating a fresh table each time.
 for lua in (old, new):
     lua.execute('''
-    pool.PrimaryCache={}; pool.OverflowCache=setmetatable({},{__mode='v'}); pool.OverflowNext=0
+    pool.PrimaryCache={}; pool.OverflowCache=setmetatable({},{__mode=pool.TrackMemory==nil and 'v' or 'k'}); pool.OverflowNext=0
     pool.NumNew=0; pool.NumRecycled=0
     for i=1,2000 do
      local event=pool:AcquireTable(); event.ScrollArea=areas.Notification; event.EventSettings={Show=false}
@@ -368,11 +376,202 @@ assert(MikSBT.CurrentProfile.Suppressions[1].Enabled)
 local recycler=MikTRO:NewRecyclerObject(0)
 local a,b,c={tag='a'},{tag='b'},{tag='c'}
 recycler:ReclaimTable(a); recycler:ReclaimTable(b); recycler:ReclaimTable(c)
-recycler.OverflowCache[1]=nil
+recycler.OverflowCache[a]=nil
 local one,two=recycler:AcquireTable(),recycler:AcquireTable()
 assert(one~=two and (one==b or one==c) and (two==b or two==c))
 assert(not recycler:TablesInOverflow())
 assert(recycler.NumRecycled==2)
 ''')
 print("PASS: hidden-event allocations 2000 -> 1; sparse weak recycler preserves distinct reusable tables")
+
+# Clearing/reusing event ownership must not require global heap queries.
+memory_counts = []
+for lua in (old, new):
+    lua.execute('''
+    memoryReads=0
+    local recycler=MikTRO:NewRecyclerObject(4)
+    local child={keep=true}
+    for i=1,5000 do
+     local value=recycler:AcquireTable(); value[1]=i; value.name='event'; value.child=child
+     recycler:ReclaimTable(value)
+     assert(next(value)==nil and table.getn(value)==0 and child.keep)
+    end
+    assert(recycler.NumNew==1 and recycler.NumRecycled==4999)
+    assert(recycler.NumErased==5000 and recycler.NumReclaimed==5000)
+    ''')
+    memory_counts.append(lua.globals().memoryReads)
+assert memory_counts == [10000, 0], memory_counts
+new.execute('''
+-- Detailed memory deltas remain explicitly available, including after toggle.
+local recycler=MikTRO:NewRecyclerObject(2,true)
+memoryReads=0
+local beforeGC=gcinfo; local value=100
+gcinfo=function() memoryReads=memoryReads+1; value=value-3; return value end
+recycler:ReclaimTable({x=1})
+assert(memoryReads==2 and recycler.AmountMemFreed==3)
+recycler.TrackMemory=false; recycler:ReclaimTable({x=1})
+assert(memoryReads==2 and recycler.AmountMemFreed==3)
+gcinfo=beforeGC
+-- Weak overflow must release unreachable tables while retaining live ones.
+local overflow=MikTRO:NewRecyclerObject(0)
+local retained={}; overflow:ReclaimTable(retained)
+do local temporary={}; overflow:ReclaimTable(temporary) end
+collectgarbage('collect') -- mock only; production never forces collection
+assert(overflow:AcquireTable()==retained and not overflow:TablesInOverflow())
+-- There are no lifetime numeric slots retained after repeated overflow bursts.
+for i=1,1000 do
+ local a,b={},{}; overflow:ReclaimTable(a); overflow:ReclaimTable(b)
+ local first,second=overflow:AcquireTable(),overflow:AcquireTable()
+ assert(first~=second and ((first==a and second==b) or (first==b and second==a)))
+end
+assert(next(overflow.OverflowCache)==nil and overflow.OverflowNext==nil)
+''')
+print("PASS: 5000 clears retain ownership/contents/counters with memory queries 10000 -> 0; opt-in memory deltas preserved; weak overflow releases unreachable tables across bursts")
+
+# Compare actual final AddAnimation text/class colors and roster-query counts.
+name_results, name_counts = [], []
+for folder in (None, NEW):
+    lua = runtime(folder)
+    lua.execute('''
+    local area=areas.Incoming
+    area.DisplaySettings.FontSettings={TextAlignIndex=1}
+    MikSBT.AVAILABLE_TEXT_ALIGNS={{AnchorPoint='LEFT'}}
+    MikSBT.ResolveEffectIcon=function() return nil end
+    local display
+    local originalNext=MikSBT.GetNextAnimationDisplayInfo
+    MikSBT.GetNextAnimationDisplayInfo=function(a) display=originalNext(a); return display end
+    for _,info in pairs(area.AnimationDisplayArray) do
+     local font=info.FontObject
+     font.ClearAllPoints=function() end
+     font.SetFont=function(self,path,size,outline) self.path,self.size,self.outline=path,size,outline end
+     font.SetTextColor=function(self,r,g,b) self.r,self.g,self.b=r,g,b end
+     font.SetText=function(self,text) self.text=text end
+    end
+    GetNumRaidMembers=function() return 40 end
+    GetNumPartyMembers=function() return 0 end
+    UnitExists=function() return false end
+    UnitIsUnit=function(a,b) return a==b end
+    LoggingCombat=function() return 0 end
+    local currentClass
+    UnitClass=function() return currentClass,currentClass end
+    local reads=0
+    UnitName=function(unit)
+     reads=reads+1
+     if unit=='raid40' then return 'Named' end
+     if unit=='player' then return 'Tester' end
+    end
+    local calls=0
+    local originalResolve=MikCEH.GetUnitIDFromName
+    MikCEH.GetUnitIDFromName=function(name) calls=calls+1; return originalResolve(name) end
+    nameTrace={}; nameWork={}
+    local classes={'PALADIN','DRUID','HUNTER','MAGE','PRIEST','ROGUE','SHAMAN','WARLOCK','WARRIOR'}
+    for i=1,12 do
+     currentClass=classes[i] or 'MAGE'
+     local name=i==10 and 'Unknown' or (i==11 and 'Tester' or 'Named')
+     local event={ScrollArea=area,Name=name,Amount=42,UnformattedText='%a (%n)',
+      FontSize=26,FontPath='font.ttf',FontOutline='OUTLINE',ColorR=1,ColorG=.5,ColorB=.25}
+     if i==12 then event.UnformattedText=nil; event.Text='Preformatted (Named)' end
+     reads,calls=0,0
+     MikSBT.AddAnimation(event)
+     nameTrace[i]={text=display.FontObject.text,path=display.FontObject.path,
+      size=display.FontObject.size,r=display.FontObject.r,g=display.FontObject.g,b=display.FontObject.b}
+     nameWork[i]={calls=calls,reads=reads}
+    end
+    ''')
+    name_results.append(plain(lua.globals().nameTrace))
+    name_counts.append(plain(lua.globals().nameWork))
+assert name_results[0] == name_results[1], name_results
+for i in range(1, 13):
+    assert name_counts[0][i]['calls'] == (1 if i == 12 else 2), name_counts
+    assert name_counts[1][i]['calls'] == 1, name_counts
+    assert name_counts[1][i]['reads'] * (1 if i == 12 else 2) == name_counts[0][i]['reads'], name_counts
+new.execute('''
+-- Ordinary stats remain passive; explicit memory sampling toggles on and off.
+MikSBT.COMMAND_STATS='stats'; memoryReads=0
+local tracked=pool.TrackMemory
+MikSBT.CommandHandler('stats')
+assert(pool.TrackMemory==tracked and memoryReads==0)
+MikSBT.CommandHandler('stats memory'); assert(pool.TrackMemory==not tracked)
+MikSBT.CommandHandler('stats memory'); assert(pool.TrackMemory==tracked)
+''')
+print("PASS: actual AddAnimation preserves nine class colors, unknown/player names and preformatted triggers; formatted roster lookups 2 -> 1; detailed recycler sampling remains available by command")
+
+# Compare complete message lifecycles, including the actual core/frame driver.
+activation_results, activation_counts = [], []
+for folder in (None, NEW):
+    lua = runtime(folder)
+    lua.execute('''
+    math.randomseed(75)
+    local area=areas.Notification
+    local frame=_G[area.AssociatedFrame]
+    local warmDriver=area.Frame~=nil
+    local streamNames={'Incoming','Outgoing','PetIncoming','PetOutgoing','Notification'}
+    local frames={}
+    for i,name in ipairs(streamNames) do
+     local stream=areas[name]; local parent=_G[stream.AssociatedFrame]
+     parent.parent=UIParent; frames[i]=parent
+     stream.DisplaySettings.FontSettings={TextAlignIndex=1}
+     -- Simulate initially hidden XML frames for the old runtime.
+     if not warmDriver then parent:Hide() end
+    end
+    MikSBT.AVAILABLE_TEXT_ALIGNS={{AnchorPoint='LEFT'}}
+    MikSBT.ResolveEffectIcon=function() return 'test-icon' end
+    shows,hides=0,0
+    local display
+    local originalNext=MikSBT.GetNextAnimationDisplayInfo
+    MikSBT.GetNextAnimationDisplayInfo=function(a) display=originalNext(a); return display end
+    local calls=0
+    local originalUpdate=MikSBT.OnUpdateAnimationFrame
+    MikSBT.OnUpdateAnimationFrame=function(f) calls=calls+1; return originalUpdate(f) end
+    function advanceMessage()
+     now=now+.01; arg1=.01; MikSBT.OnUpdate()
+     if not warmDriver then
+      for _,parent in ipairs(frames) do
+       if parent:IsVisible() then MikSBT.OnUpdateAnimationFrame(parent) end
+      end
+     end
+    end
+    activationTrace={}
+    for message=1,20 do
+     area=areas[streamNames[1+math.mod(message-1,5)]]; frame=_G[area.AssociatedFrame]
+     local event=pool:AcquireTable()
+     event.ScrollArea=area; event.Text='Message '..message
+     event.FontSize=26; event.FontPath='font.ttf'; event.FontOutline='OUTLINE'
+     event.ColorR,event.ColorG,event.ColorB=1,.5,.25
+     event.IsSticky=math.mod(message,3)==0; event.IsCrit=math.mod(message,3)==1
+     MikSBT.AddAnimation(event)
+     for tick=1,600 do
+      advanceMessage()
+      activationTrace[table.getn(activationTrace)+1]={
+       text=display.FontObject.text,alpha=display.FontObject.alpha,iconAlpha=display.Texture.alpha,
+       x=display.PositionX,y=display.PositionY,height=display.FontObject.height,active=display.IsActive}
+     end
+     assert(not display.IsActive and display.FontObject.alpha==0 and display.Texture.alpha==0)
+     local before=calls
+     for i=1,100 do advanceMessage() end
+     assert(calls==before) -- idle areas have no animation work
+    end
+    lifecycleShows,lifecycleHides=shows,hides
+    if warmDriver then
+     assert(frame:IsShown() and frame:GetScript('OnUpdate')==nil)
+     assert(not area.AnimationsActive)
+     MikSBT.AVAILABLE_FONTS={{Path='font.ttf'}}
+     MikSBT.AVAILABLE_OUTLINES={{Style='OUTLINE'}}
+     -- Parent-hidden UI does not repeatedly Show an already-shown child.
+     UIParent:Hide(); local before=shows
+     MikSBT.DisplayMessage('Hidden UI', 'Notification', false, 1, 1, 1, 26, 1, 1)
+     for i=1,20 do advanceMessage() end
+     assert(shows==before and area.AnimationsActive and display.FontObject.alpha==0)
+     UIParent:Show(); advanceMessage(); assert(display.FontObject.alpha>0)
+     -- An explicit external Hide still recovers on the next message.
+     frame:Hide(); before=shows
+     MikSBT.DisplayMessage('Recovered', 'Notification', false, 1, 1, 1, 26, 1, 1)
+     assert(frame:IsShown() and shows==before+1)
+    end
+    ''')
+    activation_results.append(plain(lua.globals().activationTrace))
+    activation_counts.append((lua.globals().lifecycleShows, lua.globals().lifecycleHides))
+assert activation_results[0] == activation_results[1]
+assert activation_counts == [(20, 20), (0, 0)], activation_counts
+print("PASS: 20 complete text/icon lifecycles across all five streams match baseline; combat display Show/Hide calls 40 -> 0; idle areas do no animation work; hidden UI and externally hidden frames recover")
 print("All imported MSBT optimization checks passed against the preserved baseline (mocked Lua 5.1 / vanilla array lengths).")
