@@ -69,7 +69,8 @@ Only those four commands are exposed. The caller must still check hostility,
 crowd control, recall, feeding, mode and distance; zPet performs those checks.
 The native side checks the live-world byte flag, resolves a living active pet,
 validates a living attack target, and verifies the dispatcher's byte signature.
-An unsupported build or detour rejects the bridge.
+Unsupported builds or unrecognized detours reject the bridge. Version 2.7
+also recognizes the inspected Nampower 4.6.2 hook chain described below.
 
 The call temporarily sets the frame-script context to zero only around the
 fixed pet dispatcher. It restores the saved context and depth with Windows
@@ -199,3 +200,51 @@ All camera/unit data is still read during each call; no cross-frame position,
 camera or raycast-result cache is introduced. The DLL is built with `/O2` speed
 optimization. Texture safety guards, pet command validation, nearby/gathering
 buffers and GC controls retain their behavior.
+
+Version 2.6 adds a narrow OctoWoW Take Position bridge for zPet:
+
+```lua
+compatible = zAPI("petPositionVersion") -- 1 when placement signatures match
+tx, ty, tz, facing, px, py, pz, radius, pvp, tanking = zAPI("petRearState", targetGUID)
+submitted, x, y, z = zAPI("petTakePosition", targetGUID)
+-- Failure: 0, reason. State-query failure: nil.
+```
+
+State reads living owner/pet/target geometry atomically; facing uses radians.
+PvP includes player-controlled enemies. Tanking means target's victim GUID is
+the pet, independently of Growl; zPet checks actual Growl autocast state.
+Take Position computes the rear point itself and validates range, nearby ground
+elevation and obstruction. It accepts no caller-provided spell, opcode or XYZ.
+Only learned player spellbook IDs 6/8 with the exact custom DBC name are allowed.
+Existing ground placement is never consumed. The byte-verified x86 spell and
+placement functions run in a scoped native context with reentry rejection and
+SEH restoration, using the same coordinate-placement primitive as ClassicAPI.
+There is no additional hook or direct coordinate write. Submission is not
+movement acknowledgement; zPet observes arrival, sends Attack after Stay,
+and handles safety, ownership, timeout, replan cadence and backoff in Lua.
+
+Version 2.7 fixes compatibility with the installed Nampower 4.6.2. Its pet,
+spellbook and terrain-click detours replace the entry bytes that 2.6 required
+to remain untouched. `VerifiedNativeEntry.h` now accepts original entries or
+the verified Hadesmem x86 gate. It checks every fixed instruction byte, the
+untouched client signature after the five-byte jump, readable hook context,
+executable gate/callbacks, and callback/vtable/implementation ownership in the
+inspected Nampower module (PE timestamp `0x6A99D431`, image size `0xDB000`).
+It never calls the gate's helper or a virtual method during validation.
+Unknown versions, modified bodies and foreign/unrecognized gates fail closed.
+Calls continue through the installed entry and hook chain; no bypass, new hook,
+patch or trampoline invocation is introduced. All earlier API contracts remain.
+
+```lua
+petEntryDetail, placementEntryDetail = zAPI("petBridgeStatus")
+```
+
+These read-only diagnostics explain rejected compatibility and identify accepted
+Nampower hooks. zPet 1.5.1 caches them during initialization for `/zpet status`.
+The former generic restart message no longer hides an actual rejection.
+Reference sources: Nampower commit `2c7f51cd436e9b0ce88271e84ce5a77c19f2c23b`,
+Hadesmem commit `741a29dc817ce4aff5c3c3cd29e0832597108b1d`, retained read-only
+under `_zPetMaintenance/native-reference/`. Tests cover valid original/hooked
+entries, all 40 fixed gate-byte mutations, invalid callbacks/context/body/memory
+permissions and 10,000 validations, plus the existing scoped command/placement
+ABI and exception recovery suites. Live game behavior needs separate validation.

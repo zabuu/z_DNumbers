@@ -14,6 +14,8 @@
 
 #include "MinHook.h"
 #include "ScopedPetCommand.h"
+#include "ScopedPetPosition.h"
+#include "VerifiedNativeEntry.h"
 #include "GcControl.h"
 
 namespace {
@@ -47,6 +49,10 @@ constexpr uintptr_t kUnitGuid = 0x00515970;
 constexpr uintptr_t kGetObjectByGuid = 0x00464870;
 constexpr uintptr_t kSetTargetByGuid = 0x00493540;
 constexpr uintptr_t kPetCommandDispatch = 0x004BD1D0;
+constexpr uintptr_t kPositionSpellDispatch = 0x004B3300;
+constexpr uintptr_t kPositionCommit = 0x006E60F0;
+constexpr uintptr_t kPositionCancel = 0x006E4900;
+constexpr uintptr_t kPositionPlacement = 0x00CECAC0;
 constexpr uintptr_t kFrameScriptContext = 0x00CEEAC0;
 constexpr uintptr_t kFrameScriptDepth = 0x00CEEAC4;
 constexpr uintptr_t kInWorld = 0x00B4B424;
@@ -540,19 +546,52 @@ int ScriptGcControl(void *L, const char *command) {
   return 5;
 }
 
-bool PetCommandBridgeAvailable() {
-  // Fail closed if another client build or a detour changes this ABI.
+bool ReadNativeEntry(uintptr_t address, void *out, size_t size) {
+  __try {
+    if (!IsReadable(address, size)) return false;
+    std::memcpy(out, reinterpret_cast<const void *>(address), size); return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool NativeEntryExecutable(uintptr_t address, size_t size) {
+  MEMORY_BASIC_INFORMATION info{};
+  return IsReadable(address, size) && VirtualQuery(reinterpret_cast<void *>(address), &info, sizeof(info)) &&
+    (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+}
+NativeEntryModule KnownNampowerModule() {
+  const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"nampower.dll"));
+  IMAGE_DOS_HEADER dos{}; IMAGE_NT_HEADERS32 nt{};
+  // Installed Nampower 4.6.2: pin the inspected image, not any DLL with this name.
+  if (!ReadNativeEntry(base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+      dos.e_lfanew < 0 || dos.e_lfanew > 0x100000 ||
+      !ReadNativeEntry(base + dos.e_lfanew, &nt, sizeof(nt)) || nt.Signature != IMAGE_NT_SIGNATURE ||
+      nt.FileHeader.Machine != IMAGE_FILE_MACHINE_I386 || nt.FileHeader.TimeDateStamp != 0x6A99D431 ||
+      nt.OptionalHeader.SizeOfImage != 0xDB000) return {};
+  return {base, nt.OptionalHeader.SizeOfImage};
+}
+NativeEntryResult InspectNativeEntry(uintptr_t preferred, const uint8_t *prefix, size_t size) {
+  return VerifyNativeEntry(At<uintptr_t>(preferred), prefix, size, KnownNampowerModule(),
+      {&ReadNativeEntry, &NativeEntryExecutable});
+}
+
+bool CheckPetCommandBridge(const char *&detail) {
+  // Fail closed for unknown changes; preserve the verified Nampower hook chain.
   // Byte-verified against the installed 1.12.1.5875 PetAttack dispatcher.
   static const uint8_t prefix[] = {
       0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x40, 0x53, 0x56, 0x57, 0x8B, 0xF9,
       0xB9, 0x02, 0x00, 0x00, 0x00, 0x8B, 0xF2, 0x89, 0x7D, 0xFC};
-  const uintptr_t dispatch = At<uintptr_t>(kPetCommandDispatch);
-  return CompatibleClient() && IsReadable(dispatch, sizeof(prefix)) &&
-         std::memcmp(reinterpret_cast<const void *>(dispatch), prefix,
-                     sizeof(prefix)) == 0 &&
-         IsReadable(At<uintptr_t>(kFrameScriptContext), sizeof(uint32_t)) &&
-         IsReadable(At<uintptr_t>(kFrameScriptDepth), sizeof(uint32_t)) &&
-         IsReadable(At<uintptr_t>(kInWorld), sizeof(uint8_t));
+  if (!CompatibleClient()) { detail = "unsupported client image"; return false; }
+  const auto result = InspectNativeEntry(kPetCommandDispatch, prefix, sizeof(prefix));
+  detail = NativeEntryDescription(result);
+  if (!NativeEntryAccepted(result)) return false;
+  if (!IsReadable(At<uintptr_t>(kFrameScriptContext), sizeof(uint32_t)) ||
+      !IsReadable(At<uintptr_t>(kFrameScriptDepth), sizeof(uint32_t)) ||
+      !IsReadable(At<uintptr_t>(kInWorld), sizeof(uint8_t))) {
+    detail = "client context unavailable"; return false;
+  }
+  return true;
+}
+bool PetCommandBridgeAvailable() {
+  const char *detail = nullptr; return CheckPetCommandBridge(detail);
 }
 
 bool LivingUnit(uint32_t unit) {
@@ -760,6 +799,8 @@ char SafeIntersect(const Vec3 *start, const Vec3 *end, Vec3 *hit, float *t, uint
     return 0;
   }
 }
+
+#include "PetRearPosition.h"
 
 int DoNearbyCreatures(void *L, float maxRange, const char *centerToken, bool reuse = false) {
   // Reusable output is an ordinary dense Lua array, never a retained native
@@ -1219,7 +1260,7 @@ int __fastcall Script_zAPI(void *L) {
   }
 
   if (std::strcmp(command, "version") == 0) {
-    LuaPushNumber(L, 2.5);
+    LuaPushNumber(L, 2.7);
     return 1;
   }
 
@@ -1252,6 +1293,31 @@ int __fastcall Script_zAPI(void *L) {
   if (std::strcmp(command, "petCommandVersion") == 0) {
     LuaPushNumber(L, PetCommandBridgeAvailable() ? 1.0 : 0.0);
     return 1;
+  }
+
+  if (std::strcmp(command, "petPositionVersion") == 0) {
+    LuaPushNumber(L, PetPositionAvailable() ? 1 : 0); return 1;
+  }
+  if (std::strcmp(command, "petBridgeStatus") == 0) {
+    const char *petDetail = nullptr, *positionDetail = nullptr;
+    CheckPetCommandBridge(petDetail); CheckPetPositionBridge(positionDetail);
+    LuaPushString(L, petDetail); LuaPushString(L, positionDetail); return 2;
+  }
+  if (std::strcmp(command, "petRearState") == 0 && LuaGetTop(L) >= 2) {
+    PetRearState state;
+    if (!ReadPetRearState(LuaToString(L, 2), state)) { LuaPushNil(L); return 1; }
+    LuaPushNumber(L, state.target.x); LuaPushNumber(L, state.target.y); LuaPushNumber(L, state.target.z);
+    LuaPushNumber(L, state.facing);
+    LuaPushNumber(L, state.pet.x); LuaPushNumber(L, state.pet.y); LuaPushNumber(L, state.pet.z);
+    LuaPushNumber(L, state.radius); LuaPushNumber(L, state.pvp ? 1 : 0); LuaPushNumber(L, state.tanking ? 1 : 0);
+    return 10;
+  }
+  if (std::strcmp(command, "petTakePosition") == 0 && LuaGetTop(L) >= 2) {
+    Vec3 point{}; const char *reason = "invalid owner position";
+    const bool submitted = TakePetRearPosition(LuaToString(L, 2), point, reason);
+    LuaPushNumber(L, submitted ? 1 : 0);
+    if (!submitted) { LuaPushString(L, reason); return 2; }
+    LuaPushNumber(L, point.x); LuaPushNumber(L, point.y); LuaPushNumber(L, point.z); return 4;
   }
 
   if (std::strcmp(command, "petCommand") == 0) {
