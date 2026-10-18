@@ -19,6 +19,10 @@ x, y, z, height = zAPI("losPosition", unitTokenOrGUID)
 x, y, depth = zAPI("worldToScreen", worldX, worldY, worldZ)
 x, y, depth, worldX, worldY, worldZ = zAPI("projectUnit", unitTokenOrGUID, verticalOffset)
 x, y, depth, worldX, worldY, worldZ = zAPI("projectNameplate", unitTokenOrGUID, verticalOffset)
+batchVersion = zAPI("nameplateBatchVersion") -- 1 in zAPI 2.8
+guids, projected = {}, {} -- private, reusable arrays; fill guids with GUID strings
+count = zAPI("projectNameplatesInto", guids, inputCount, projected)
+batchCalls, batchRows, batchGrowths, retainedRows = zAPI("nameplateBatchStats")
 x, y, depth, worldX, worldY, worldZ = zAPI("projectUnitForward", unitTokenOrGUID, verticalOffset, forwardYards)
 groundVersion = zAPI("groundObjectVersion") -- 1 in zAPI 2.2
 guid, x, y, z, objectType, entryOrSpellID, state = zAPI("groundObject", objectType, entryOrSpellID, excludedGUID)
@@ -46,6 +50,33 @@ does before screen-space collision placement. Unlike `projectUnit`, it is not
 based on collision-box height. It never reads or repositions a nameplate frame;
 an unavailable model/attachment returns nil rather than a different anchor.
 `projectUnit` and damage-number callers retain their existing behavior.
+
+Version 2.8 adds batched name-attachment projection for zNameplates 2.1.2.
+`projectNameplatesInto` accepts up to 512 GUID strings and an explicit integer
+count, and replaces the caller's private output array. Each input occupies seven
+dense numeric slots: `valid, x, y, depth, worldX, worldY, worldZ`. A missing,
+invalid, off-camera or unavailable model emits seven zeros (`valid = 0`); a
+successful projection has `valid = 1`. The command returns the input count on
+success, including zero. Nil means the whole call failed and output is unchanged.
+Shrinking/empty successful calls clear the old tail and update Lua 5.0's stored
+array length. Count/type/length checks bound both work and retained buffers.
+
+The batch captures the camera and WorldFrame viewport once per call, then uses
+the exact existing model-name-attachment and native WorldToScreen/DDC conversion
+for every GUID. It does not scan the object list, borrow collision-shifted native
+frames, approximate unit height, change clipping, or cache object/model/camera
+pointers across calls. Output coordinates and depth have the same meaning as
+`projectNameplate(guid, 0)`. World attachment coordinates are not unit origins:
+existing world-distance samples remain separate at their unchanged cadence.
+
+Each invocation owns its native scratch vector through output, including during
+reentrant Lua allocation; at most 512 rows are retained for reuse. No per-row Lua
+tables or strings are created by the command. `nameplateBatchStats` reports
+cumulative successful batches, input rows, scratch-capacity growths, and currently
+retained rows. These are diagnostic counts, not measured FPS or allocation times.
+Old commands and the 2.7 pet bridges remain unchanged. Native tests compare batch
+output with the actual single-unit projection helper and cover failures, reentry,
+stored lengths and 10,000 warm batches. A full client restart loads the new DLL.
 
 `projectLine` is the zAPI 1.5 atomic projection path. It resolves both unit
 positions and projects them against one camera capture. If the target is behind

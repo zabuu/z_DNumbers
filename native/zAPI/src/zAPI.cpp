@@ -941,6 +941,8 @@ bool ProjectWorld(const Vec3 &world, float &x, float &y, float &depth) {
   return true;
 }
 
+#include "NameplateBatch.h"
+
 bool SunLight(Vec3 &lightDir, float &diffuseR, float &diffuseG, float &diffuseB,
               float &ambientR, float &ambientG, float &ambientB) {
   if (!IsReadable(kLightDiffuse, 0x50)) return false;
@@ -1260,8 +1262,18 @@ int __fastcall Script_zAPI(void *L) {
   }
 
   if (std::strcmp(command, "version") == 0) {
-    LuaPushNumber(L, 2.7);
+    LuaPushNumber(L, 2.8);
     return 1;
+  }
+
+  if (std::strcmp(command, "nameplateBatchVersion") == 0) { LuaPushNumber(L, 1); return 1; }
+  if (std::strcmp(command, "projectNameplatesInto") == 0) return DoProjectNameplatesInto(L);
+  if (std::strcmp(command, "nameplateBatchStats") == 0) {
+    LuaPushNumber(L, static_cast<double>(g_nameplateBatchCalls));
+    LuaPushNumber(L, static_cast<double>(g_nameplateBatchRows));
+    LuaPushNumber(L, static_cast<double>(g_nameplateBatchGrowths));
+    LuaPushNumber(L, static_cast<double>(g_nameplateBatchScratch.capacity()));
+    return 4;
   }
 
   if (std::strcmp(command, "gcControlVersion") == 0 ||
