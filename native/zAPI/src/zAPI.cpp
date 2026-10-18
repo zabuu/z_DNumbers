@@ -150,10 +150,13 @@ volatile LONG g_initResult = 1;
 volatile LONG g_mhInitialized = 0;
 volatile LONG g_petCommandBusy = 0;
 bool g_textHookInstalled = false;
-std::unordered_map<void *, std::vector<float>> g_fontBaselines;
-std::unordered_map<void *, std::vector<float>> g_fontWarped;
-std::unordered_map<void *, float> g_fontAmounts;
-std::unordered_map<void *, void *> g_fontNodes;
+struct FontTransformState {
+  void *node = nullptr;
+  float amount = 0.0f;
+  std::vector<float> baseline;
+  std::vector<float> warped;
+};
+std::unordered_map<void *, FontTransformState> g_fontStates;
 std::unordered_map<void *, void *> g_nodeOwners;
 
 template <typename T>
@@ -218,9 +221,14 @@ void *ResolveLuaObject(void *L, int index) {
   return object;
 }
 
-template <typename Fn>
-int ForEachFontVertex(void *node, Fn fn) {
-  int visited = 0;
+struct FontVertexPages {
+  struct Page { float *vertices; int count; } pages[kTextNodePageCount]{};
+  int used = 0;
+  size_t vertices = 0;
+};
+
+FontVertexPages ReadFontVertexPages(void *node) {
+  FontVertexPages result{};
   auto *bytes = reinterpret_cast<uint8_t *>(node);
   for (int page = 0; page < kTextNodePageCount; ++page) {
     const uintptr_t slot = reinterpret_cast<uintptr_t>(bytes) +
@@ -235,12 +243,17 @@ int ForEachFontVertex(void *node, Fn fn) {
         !IsReadable(reinterpret_cast<uintptr_t>(verts),
                     static_cast<size_t>(count) * kTextVertStrideFloats * sizeof(float)))
       continue;
-    for (int i = 0; i < count; ++i) {
-      fn(verts + i * kTextVertStrideFloats);
-      ++visited;
-    }
+    result.pages[result.used++] = {verts, count};
+    result.vertices += static_cast<size_t>(count);
   }
-  return visited;
+  return result;
+}
+
+template <typename Fn>
+void ForEachFontVertex(const FontVertexPages &pages, Fn fn) {
+  for (int page = 0; page < pages.used; ++page)
+    for (int i = 0; i < pages.pages[page].count; ++i)
+      fn(pages.pages[page].vertices + i * kTextVertStrideFloats);
 }
 
 void *FontStringNode(void *fontString) {
@@ -253,21 +266,30 @@ void *FontStringNode(void *fontString) {
   return *reinterpret_cast<void **>(block + kTextBlockNode);
 }
 
-std::vector<float> ReadFontPositions(void *node) {
-  std::vector<float> positions;
-  const int count = ForEachFontVertex(node, [](float *) {});
-  if (count <= 0) return positions;
-  positions.reserve(static_cast<size_t>(count) * 2);
-  ForEachFontVertex(node, [&](float *vertex) {
-    positions.push_back(vertex[0]);
-    positions.push_back(vertex[1]);
-  });
-  return positions;
+void ResizeFontPositions(std::vector<float> &positions, size_t count) {
+  // Reuse ordinary damage-text buffers, but release unusually large capacity
+  // when a pooled font returns to short text (128 KiB per retained buffer).
+  constexpr size_t retainedFloats = 32768;
+  if (positions.capacity() > retainedFloats && count <= retainedFloats) {
+    std::vector<float> compact(count);
+    positions.swap(compact);
+  } else {
+    positions.resize(count);
+  }
 }
 
-void WriteFontPositions(void *node, const std::vector<float> &positions) {
+void ReadFontPositions(const FontVertexPages &pages, std::vector<float> &positions) {
+  ResizeFontPositions(positions, pages.vertices * 2);
   size_t index = 0;
-  ForEachFontVertex(node, [&](float *vertex) {
+  ForEachFontVertex(pages, [&](float *vertex) {
+    positions[index++] = vertex[0];
+    positions[index++] = vertex[1];
+  });
+}
+
+void WriteFontPositions(const FontVertexPages &pages, const std::vector<float> &positions) {
+  size_t index = 0;
+  ForEachFontVertex(pages, [&](float *vertex) {
     if (index + 1 < positions.size()) {
       vertex[0] = positions[index++];
       vertex[1] = positions[index++];
@@ -275,61 +297,61 @@ void WriteFontPositions(void *node, const std::vector<float> &positions) {
   });
 }
 
-bool SamePositions(const std::vector<float> &left,
-                   const std::vector<float> &right) {
-  if (left.size() != right.size()) return false;
-  for (size_t i = 0; i < left.size(); ++i) {
-    if (std::fabs(left[i] - right[i]) > 0.0001f) return false;
-  }
-  return true;
+bool SameFontPositions(const FontVertexPages &pages, const std::vector<float> &positions) {
+  if (pages.vertices * 2 != positions.size()) return false;
+  size_t index = 0;
+  bool same = true;
+  ForEachFontVertex(pages, [&](float *vertex) {
+    if (std::fabs(vertex[0] - positions[index++]) > 0.0001f) same = false;
+    if (std::fabs(vertex[1] - positions[index++]) > 0.0001f) same = false;
+  });
+  return same;
 }
 
 void ForgetFontTrapezoid(void *fontString) {
-  auto node = g_fontNodes.find(fontString);
-  if (node != g_fontNodes.end()) {
-    auto owner = g_nodeOwners.find(node->second);
+  auto state = g_fontStates.find(fontString);
+  if (state != g_fontStates.end()) {
+    auto owner = g_nodeOwners.find(state->second.node);
     if (owner != g_nodeOwners.end() && owner->second == fontString)
       g_nodeOwners.erase(owner);
   }
-  g_fontBaselines.erase(fontString);
-  g_fontWarped.erase(fontString);
-  g_fontAmounts.erase(fontString);
-  g_fontNodes.erase(fontString);
+  g_fontStates.erase(fontString);
 }
 
 bool SetFontTrapezoid(void *fontString, float amount) {
   void *node = FontStringNode(fontString);
   if (!node) return false;
 
-  auto oldNode = g_fontNodes.find(fontString);
-  if (oldNode != g_fontNodes.end() && oldNode->second != node) {
-    g_nodeOwners.erase(oldNode->second);
-    g_fontBaselines.erase(fontString);
-    g_fontWarped.erase(fontString);
+  // Validate page descriptors once per operation. No client code runs between
+  // the following passes, so they can reuse these stack-owned page views.
+  const FontVertexPages pages = ReadFontVertexPages(node);
+  if (!pages.vertices) return false;
+  auto &state = g_fontStates[fontString];
+  if (state.node != node) {
+    auto owner = g_nodeOwners.find(state.node);
+    if (owner != g_nodeOwners.end() && owner->second == fontString)
+      g_nodeOwners.erase(owner);
+    state.baseline.clear();
+    state.warped.clear();
+    state.node = node;
   }
-  g_fontNodes[fontString] = node;
   g_nodeOwners[node] = fontString;
-
-  std::vector<float> current = ReadFontPositions(node);
-  if (current.empty()) return false;
-  auto baseline = g_fontBaselines.find(fontString);
-  auto warped = g_fontWarped.find(fontString);
-  if (baseline != g_fontBaselines.end() && warped != g_fontWarped.end() &&
-      SamePositions(current, warped->second)) {
-    WriteFontPositions(node, baseline->second);
+  if (!state.baseline.empty() && SameFontPositions(pages, state.warped)) {
+    if (state.amount == amount && std::fabs(amount) >= 0.0001f) return true;
+    WriteFontPositions(pages, state.baseline);
   } else {
-    g_fontBaselines[fontString] = current;
+    ReadFontPositions(pages, state.baseline);
   }
 
   if (std::fabs(amount) < 0.0001f) {
     ForgetFontTrapezoid(fontString);
     return true;
   }
-  g_fontAmounts[fontString] = amount;
+  state.amount = amount;
 
   float minX = 0.0f, maxX = 0.0f, minY = 0.0f, maxY = 0.0f;
   bool first = true;
-  ForEachFontVertex(node, [&](float *vertex) {
+  ForEachFontVertex(pages, [&](float *vertex) {
     if (first) {
       minX = maxX = vertex[0]; minY = maxY = vertex[1]; first = false;
     } else {
@@ -343,26 +365,30 @@ bool SetFontTrapezoid(void *fontString, float amount) {
   // Diagnostic-strength ceiling: at 100% the bottom is 10% of its normal
   // width while the top is 190%, making a successful transform unmistakable.
   amount = (std::max)(-0.90f, (std::min)(0.90f, amount));
-  ForEachFontVertex(node, [&](float *vertex) {
+  ResizeFontPositions(state.warped, pages.vertices * 2);
+  size_t index = 0;
+  ForEachFontVertex(pages, [&](float *vertex) {
     const float vertical = (vertex[1] - minY) / height;
     const float scale = 1.0f + amount * (vertical * 2.0f - 1.0f);
     vertex[0] = centerX + (vertex[0] - centerX) * scale;
+    state.warped[index++] = vertex[0];
+    state.warped[index++] = vertex[1];
   });
-  g_fontWarped[fontString] = ReadFontPositions(node);
   return true;
 }
 
 void __fastcall TextDrawBuilderHook(void *node) {
   g_textDrawBuilderOriginal(node);
+  if (g_nodeOwners.empty()) return;
   auto owner = g_nodeOwners.find(node);
   if (owner == g_nodeOwners.end()) return;
   void *fontString = owner->second;
-  auto amount = g_fontAmounts.find(fontString);
-  if (amount == g_fontAmounts.end() || FontStringNode(fontString) != node) {
+  auto state = g_fontStates.find(fontString);
+  if (state == g_fontStates.end() || FontStringNode(fontString) != node) {
     ForgetFontTrapezoid(fontString);
     return;
   }
-  SetFontTrapezoid(fontString, amount->second);
+  SetFontTrapezoid(fontString, state->second.amount);
 }
 
 void __fastcall DeviceSetTextureHook(void *device, void * /*edx*/, void *tex) {
@@ -664,6 +690,8 @@ bool SafeEnumVisible(EnumVisibleCallbackFn cb, void *ctx) {
   }
 }
 
+#include "GatherObjects.h"
+
 // Read-only 1.12.1 UpdateFields. CGObject +0x08 is the base descriptor,
 // including OBJECT_FIELD_GUID; never confuse it with CGUnit's +0x110 block.
 struct GroundObject {
@@ -814,10 +842,29 @@ bool CameraState(Vec3 &position, Vec3 &forward, Vec3 &right, Vec3 &up,
   return std::isfinite(fov) && std::isfinite(aspect);
 }
 
+struct ProjectionViewport {
+  uint32_t frame = 0;
+  float left = 0.0f;
+  float bottom = 0.0f;
+};
+
+bool ReadProjectionViewport(ProjectionViewport &viewport) {
+  viewport.frame = *At<uint32_t *>(kWorldFrame);
+  if (!viewport.frame || !IsReadable(viewport.frame + 0x3A0, 9)) return false;
+  viewport.left = *reinterpret_cast<const float *>(viewport.frame + 0x3A4);
+  viewport.bottom = *reinterpret_cast<const float *>(viewport.frame + 0x3A0);
+  return true;
+}
+
 bool ProjectWorldWithCamera(const Vec3 &world, const Vec3 &camera,
-                            const Vec3 &forward, ProjectionResult &result) {
-  const uint32_t worldFrame = *At<uint32_t *>(kWorldFrame);
-  if (!IsReadable(worldFrame + 0x3A8, 1)) return false;
+                            const Vec3 &forward, ProjectionResult &result,
+                            const ProjectionViewport *capturedViewport = nullptr) {
+  ProjectionViewport localViewport{};
+  if (!capturedViewport) {
+    if (!ReadProjectionViewport(localViewport)) return false;
+    capturedViewport = &localViewport;
+  }
+  const uint32_t worldFrame = capturedViewport->frame;
 
   Vec3 input = world;
   Vec3 projected{};
@@ -830,8 +877,8 @@ bool ProjectWorldWithCamera(const Vec3 &world, const Vec3 &camera,
   result.ndcY = -1.0f;
   At<DdcToNdcFn>(kDdcToNdc)(&result.ndcX, &result.ndcY,
                              result.ddcX, result.ddcY);
-  result.screenX = *reinterpret_cast<float *>(worldFrame + 0x3A4) + result.ndcX;
-  result.screenY = *reinterpret_cast<float *>(worldFrame + 0x3A0) + result.ndcY;
+  result.screenX = capturedViewport->left + result.ndcX;
+  result.screenY = capturedViewport->bottom + result.ndcY;
   result.depth = (world.x - camera.x) * forward.x +
                  (world.y - camera.y) * forward.y +
                  (world.z - camera.z) * forward.z;
@@ -1172,7 +1219,7 @@ int __fastcall Script_zAPI(void *L) {
   }
 
   if (std::strcmp(command, "version") == 0) {
-    LuaPushNumber(L, 2.3);
+    LuaPushNumber(L, 2.5);
     return 1;
   }
 
@@ -1185,6 +1232,13 @@ int __fastcall Script_zAPI(void *L) {
   if (std::strcmp(command, "nearbyBufferVersion") == 0) {
     LuaPushNumber(L, 1.0);
     return 1;
+  }
+
+  if (std::strcmp(command, "gatherBufferVersion") == 0) { LuaPushNumber(L, 1.0);return 1; }
+  if (std::strcmp(command, "gatherObjectsInto") == 0) return DoGatherObjects(L);
+  if (std::strcmp(command, "gatherScanStats") == 0) {
+    LuaPushNumber(L, static_cast<double>(g_gatherQueries));
+    LuaPushNumber(L, static_cast<double>(g_gatherScratch.capacity()));return 2;
   }
 
   if (std::strcmp(command, "nearbyScanStats") == 0) {
@@ -1294,7 +1348,7 @@ int __fastcall Script_zAPI(void *L) {
         applied = SetFontTrapezoid(
             fontString, static_cast<float>(LuaToNumber(L, 3)));
       } __except (EXCEPTION_EXECUTE_HANDLER) {
-        g_fontBaselines.erase(fontString);
+        ForgetFontTrapezoid(fontString);
         applied = false;
       }
     }
@@ -1411,21 +1465,28 @@ int __fastcall Script_zAPI(void *L) {
       LuaIsNumber(L, 4) && LuaIsNumber(L, 5)) {
     uint32_t sourceUnit = 0, targetUnit = 0;
     Vec3 sourceWorld{}, targetWorld{};
-    if (!ResolveUnit(LuaToString(L, 2), sourceUnit) ||
-        !ResolveUnit(LuaToString(L, 3), targetUnit) ||
-        !UnitPosition(sourceUnit, sourceWorld) ||
-        !UnitPosition(targetUnit, targetWorld)) {
+    const char *sourceToken = LuaToString(L, 2);
+    const char *targetToken = LuaToString(L, 3);
+    if (!ResolveUnit(sourceToken, sourceUnit)) { LuaPushNil(L); return 1; }
+    if (sourceToken && targetToken && std::strcmp(sourceToken, targetToken) == 0)
+      targetUnit = sourceUnit;
+    else if (!ResolveUnit(targetToken, targetUnit)) { LuaPushNil(L); return 1; }
+    if (!UnitPosition(sourceUnit, sourceWorld)) {
       LuaPushNil(L);
       return 1;
     }
+    if (sourceUnit == targetUnit) targetWorld = sourceWorld;
+    else if (!UnitPosition(targetUnit, targetWorld)) { LuaPushNil(L); return 1; }
     sourceWorld.z += static_cast<float>(LuaToNumber(L, 4));
     targetWorld.z += static_cast<float>(LuaToNumber(L, 5));
 
     Vec3 camera{}, forward{}, right{}, up{};
     float fov = 0.0f, aspect = 0.0f;
     ProjectionResult sourceProjection{}, targetProjection{};
+    ProjectionViewport viewport{};
     if (!CameraState(camera, forward, right, up, fov, aspect) ||
-        !ProjectWorldWithCamera(sourceWorld, camera, forward, sourceProjection)) {
+        !ReadProjectionViewport(viewport) ||
+        !ProjectWorldWithCamera(sourceWorld, camera, forward, sourceProjection, &viewport)) {
       LuaPushNil(L);
       return 1;
     }
@@ -1436,7 +1497,10 @@ int __fastcall Script_zAPI(void *L) {
     // the screen edge; its distance is intentionally arbitrary. Dividing the
     // horizontal component by camera aspect makes the direction isotropic
     // after normalized coordinates are expanded to UI pixels.
-    if (!ProjectWorldWithCamera(targetWorld, camera, forward, targetProjection)) {
+    const bool samePoint = sourceWorld.x == targetWorld.x &&
+      sourceWorld.y == targetWorld.y && sourceWorld.z == targetWorld.z;
+    if (samePoint) targetProjection = sourceProjection;
+    else if (!ProjectWorldWithCamera(targetWorld, camera, forward, targetProjection, &viewport)) {
       const Vec3 delta{targetWorld.x - sourceWorld.x,
                        targetWorld.y - sourceWorld.y,
                        targetWorld.z - sourceWorld.z};
@@ -1761,10 +1825,7 @@ void __fastcall RegisterFunctionHook(const char *name, LuaCFunction function) {
   // /reload. Registering immediately after it avoids sharing UnitXP's hook
   // and keeps zAPI out of the glue/login Lua state.
   if (name && std::strcmp(name, "UnitXP") == 0) {
-    g_fontBaselines.clear();
-    g_fontWarped.clear();
-    g_fontAmounts.clear();
-    g_fontNodes.clear();
+    g_fontStates.clear();
     g_nodeOwners.clear();
     g_registerOriginal("zAPI", &Script_zAPI);
   }

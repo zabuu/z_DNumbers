@@ -19,7 +19,7 @@ $inputs = @(
   ('"' + (Join-Path $minhook "src\hde\hde32.c") + '"')
 ) -join " "
 
-$command = 'call "' + $vcvars + '" x86 >nul && cl /nologo /LD /O1 /MT /EHsc ' +
+$command = 'call "' + $vcvars + '" x86 >nul && cl /nologo /LD /O2 /MT /EHsc ' +
   '/std:c++17 /DWIN32_LEAN_AND_MEAN /D_X86_ ' +
   '/I"' + (Join-Path $minhook "include") + '" ' +
   '/I"' + (Join-Path $minhook "src") + '" ' +

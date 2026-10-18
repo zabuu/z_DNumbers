@@ -126,6 +126,37 @@ native cards. Position/type/owner fields follow the
 [1.12.1 UpdateFields contract](https://github.com/vmangos/core/blob/development/src/game/Objects/UpdateFields_1_12_1.h).
 The addon, not this native API, tracks observed creation/trigger time and expiry.
 
+Version 2.4 adds a read-only gathering snapshot for zMap:
+
+```lua
+compatible = zAPI("gatherBufferVersion") -- 1
+local buffer = {} -- private, reused caller-owned dense array
+count, playerX, playerY, playerZ = zAPI("gatherObjectsInto", buffer)
+queries, retainedNativeCapacity = zAPI("gatherScanStats")
+```
+
+Each object occupies ten consecutive entries: GUID string, object entry,
+world X/Y/Z, display ID, GO type, state, flags and dynamic flags. `count` is
+the number of objects, while `table.getn(buffer)` is `count * 10`. Results
+sort by full GUID. Zero means a successful empty snapshot; nil means failure
+and leaves the buffer unchanged. The player position belongs to the same
+synchronous query. Lua 5.0's stored array length and old tail are updated.
+
+The query enumerates only client-loaded public gameobjects, accepts container
+type 3 and fishing-hole type 25, and rejects traps, fishing bobbers, used
+containers and noninteractive objects. Descriptor GUID/type/range, finite
+positions and live player/world state are checked. Resource identification
+belongs to zMap's identity catalogue; these results contain no remote spawn
+database or respawn prediction. No target, interaction, tracking buff, network
+request, memory-writing command or additional engine hook is added.
+
+Native scratch capacity and Lua output are reused. Reentry cannot overwrite
+an outer query's vector. At most 4,096 native records are retained between
+queries; larger successful snapshots remain complete and release excess
+capacity. A malformed million-entry caller buffer or snapshot larger than
+100,000 objects fails instead of returning partial live state. zMap scans
+twice per second only while its window and live gathering are enabled.
+
 Version 2.3 adds signature-verified GC controls for OctoGC:
 
 ```lua
@@ -152,3 +183,19 @@ These controls make bounded combat deferral possible; they do not promise that
 all collection can be postponed safely or that full cleanup becomes incremental.
 The Lua scheduler, tests and limits are documented in `OctoGC/README.md` under
 the AddOns root. Existing 2.2 forward/ground queries and earlier APIs remain.
+
+Version 2.5 reduces rendering overhead while preserving these command contracts.
+Font trapezoid transforms retain two buffers per active font in one state record,
+validate glyph pages once per synchronous operation, and skip rewriting an
+already identical transform. Normal warmed transforms allocate no temporary
+vertex vectors; unusually large capacities are released when text shrinks below
+the 32,768-float retention limit. Disabling a transform still restores the original
+vertices and releases its state. The draw hook immediately passes through when
+no fonts use the effect.
+
+`projectLine` captures the viewport once for both endpoints and reuses resolution,
+position and projection work when both endpoints refer to the same unit/point.
+All camera/unit data is still read during each call; no cross-frame position,
+camera or raycast-result cache is introduced. The DLL is built with `/O2` speed
+optimization. Texture safety guards, pet command validation, nearby/gathering
+buffers and GC controls retain their behavior.
