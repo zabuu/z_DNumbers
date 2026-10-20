@@ -19,6 +19,10 @@ x, y, z, height = zAPI("losPosition", unitTokenOrGUID)
 x, y, depth = zAPI("worldToScreen", worldX, worldY, worldZ)
 x, y, depth, worldX, worldY, worldZ = zAPI("projectUnit", unitTokenOrGUID, verticalOffset)
 x, y, depth, worldX, worldY, worldZ = zAPI("projectNameplate", unitTokenOrGUID, verticalOffset)
+batchVersion = zAPI("nameplateBatchVersion") -- 1 in zAPI 2.8
+guids, projected = {}, {} -- private, reusable arrays; fill guids with GUID strings
+count = zAPI("projectNameplatesInto", guids, inputCount, projected)
+batchCalls, batchRows, batchGrowths, retainedRows = zAPI("nameplateBatchStats")
 x, y, depth, worldX, worldY, worldZ = zAPI("projectUnitForward", unitTokenOrGUID, verticalOffset, forwardYards)
 groundVersion = zAPI("groundObjectVersion") -- 1 in zAPI 2.2
 guid, x, y, z, objectType, entryOrSpellID, state = zAPI("groundObject", objectType, entryOrSpellID, excludedGUID)
@@ -47,6 +51,33 @@ based on collision-box height. It never reads or repositions a nameplate frame;
 an unavailable model/attachment returns nil rather than a different anchor.
 `projectUnit` and damage-number callers retain their existing behavior.
 
+Version 2.8 adds batched name-attachment projection for zNameplates 2.1.2.
+`projectNameplatesInto` accepts up to 512 GUID strings and an explicit integer
+count, and replaces the caller's private output array. Each input occupies seven
+dense numeric slots: `valid, x, y, depth, worldX, worldY, worldZ`. A missing,
+invalid, off-camera or unavailable model emits seven zeros (`valid = 0`); a
+successful projection has `valid = 1`. The command returns the input count on
+success, including zero. Nil means the whole call failed and output is unchanged.
+Shrinking/empty successful calls clear the old tail and update Lua 5.0's stored
+array length. Count/type/length checks bound both work and retained buffers.
+
+The batch captures the camera and WorldFrame viewport once per call, then uses
+the exact existing model-name-attachment and native WorldToScreen/DDC conversion
+for every GUID. It does not scan the object list, borrow collision-shifted native
+frames, approximate unit height, change clipping, or cache object/model/camera
+pointers across calls. Output coordinates and depth have the same meaning as
+`projectNameplate(guid, 0)`. World attachment coordinates are not unit origins:
+existing world-distance samples remain separate at their unchanged cadence.
+
+Each invocation owns its native scratch vector through output, including during
+reentrant Lua allocation; at most 512 rows are retained for reuse. No per-row Lua
+tables or strings are created by the command. `nameplateBatchStats` reports
+cumulative successful batches, input rows, scratch-capacity growths, and currently
+retained rows. These are diagnostic counts, not measured FPS or allocation times.
+Old commands and the 2.7 pet bridges remain unchanged. Native tests compare batch
+output with the actual single-unit projection helper and cover failures, reentry,
+stored lengths and 10,000 warm batches. A full client restart loads the new DLL.
+
 `projectLine` is the zAPI 1.5 atomic projection path. It resolves both unit
 positions and projects them against one camera capture. If the target is behind
 the near plane, its screen coordinate becomes a synthetic point along the same
@@ -69,7 +100,8 @@ Only those four commands are exposed. The caller must still check hostility,
 crowd control, recall, feeding, mode and distance; zPet performs those checks.
 The native side checks the live-world byte flag, resolves a living active pet,
 validates a living attack target, and verifies the dispatcher's byte signature.
-An unsupported build or detour rejects the bridge.
+Unsupported builds or unrecognized detours reject the bridge. Version 2.7
+also recognizes the inspected Nampower 4.6.2 hook chain described below.
 
 The call temporarily sets the frame-script context to zero only around the
 fixed pet dispatcher. It restores the saved context and depth with Windows
@@ -199,3 +231,51 @@ All camera/unit data is still read during each call; no cross-frame position,
 camera or raycast-result cache is introduced. The DLL is built with `/O2` speed
 optimization. Texture safety guards, pet command validation, nearby/gathering
 buffers and GC controls retain their behavior.
+
+Version 2.6 adds a narrow OctoWoW Take Position bridge for zPet:
+
+```lua
+compatible = zAPI("petPositionVersion") -- 1 when placement signatures match
+tx, ty, tz, facing, px, py, pz, radius, pvp, tanking = zAPI("petRearState", targetGUID)
+submitted, x, y, z = zAPI("petTakePosition", targetGUID)
+-- Failure: 0, reason. State-query failure: nil.
+```
+
+State reads living owner/pet/target geometry atomically; facing uses radians.
+PvP includes player-controlled enemies. Tanking means target's victim GUID is
+the pet, independently of Growl; zPet checks actual Growl autocast state.
+Take Position computes the rear point itself and validates range, nearby ground
+elevation and obstruction. It accepts no caller-provided spell, opcode or XYZ.
+Only learned player spellbook IDs 6/8 with the exact custom DBC name are allowed.
+Existing ground placement is never consumed. The byte-verified x86 spell and
+placement functions run in a scoped native context with reentry rejection and
+SEH restoration, using the same coordinate-placement primitive as ClassicAPI.
+There is no additional hook or direct coordinate write. Submission is not
+movement acknowledgement; zPet observes arrival, sends Attack after Stay,
+and handles safety, ownership, timeout, replan cadence and backoff in Lua.
+
+Version 2.7 fixes compatibility with the installed Nampower 4.6.2. Its pet,
+spellbook and terrain-click detours replace the entry bytes that 2.6 required
+to remain untouched. `VerifiedNativeEntry.h` now accepts original entries or
+the verified Hadesmem x86 gate. It checks every fixed instruction byte, the
+untouched client signature after the five-byte jump, readable hook context,
+executable gate/callbacks, and callback/vtable/implementation ownership in the
+inspected Nampower module (PE timestamp `0x6A99D431`, image size `0xDB000`).
+It never calls the gate's helper or a virtual method during validation.
+Unknown versions, modified bodies and foreign/unrecognized gates fail closed.
+Calls continue through the installed entry and hook chain; no bypass, new hook,
+patch or trampoline invocation is introduced. All earlier API contracts remain.
+
+```lua
+petEntryDetail, placementEntryDetail = zAPI("petBridgeStatus")
+```
+
+These read-only diagnostics explain rejected compatibility and identify accepted
+Nampower hooks. zPet 1.5.1 caches them during initialization for `/zpet status`.
+The former generic restart message no longer hides an actual rejection.
+Reference sources: Nampower commit `2c7f51cd436e9b0ce88271e84ce5a77c19f2c23b`,
+Hadesmem commit `741a29dc817ce4aff5c3c3cd29e0832597108b1d`, retained read-only
+under `_zPetMaintenance/native-reference/`. Tests cover valid original/hooked
+entries, all 40 fixed gate-byte mutations, invalid callbacks/context/body/memory
+permissions and 10,000 validations, plus the existing scoped command/placement
+ABI and exception recovery suites. Live game behavior needs separate validation.
