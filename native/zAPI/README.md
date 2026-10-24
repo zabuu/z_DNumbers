@@ -78,6 +78,83 @@ Old commands and the 2.7 pet bridges remain unchanged. Native tests compare batc
 output with the actual single-unit projection helper and cover failures, reentry,
 stored lengths and 10,000 warm batches. A full client restart loads the new DLL.
 
+Version 2.9 retains this version-1 batch contract. It copies validated GUIDs into
+the bounded scratch rows before projection, then shares successful `VirtualQuery`
+region checks during the native computation phase only (32 region slots). No
+unit, model, position, camera or page view survives the batch. Live reads and
+per-row SEH remain; input/output run outside the page-cache scope, including
+allocation/reentry. Other commands retain uncached memory validation. A 50-row
+native fixture with real Windows page queries reduces 400 queries to 1 and took
+0.190 ms versus 0.032 ms per batch on the development machine. Those timings
+isolate validation overhead with simulated client geometry; they are not WoW FPS
+measurements. Tests also cover scope nesting, overflow, protected pages between
+calls, projection parity, failures, reentry and bounded warm storage.
+
+Version 3.1 adds live association validation to a separate projection contract:
+
+```lua
+supported = zAPI("nameplateValidationVersion") -- 1
+count = zAPI("projectNameplatesValidatedInto", privateGuids, inputCount,
+             privateOutput, privateUnitTokens, privateNativeParentFrames)
+calls, rows, current, projected, growths, capacity = zAPI("nameplateValidationStats")
+```
+
+Each of up to 512 rows emits eight numbers: current, projected, x, y, depth,
+worldX, worldY, worldZ. Flags are 0/1. The live token must resolve to the expected
+GUID; the unit's nameplate pointer and frame's GUID must both match the supplied
+parent wrapper. These fields (`CGUnit+0x30`, `+0xE60`, frame `+0x4E8`) and the
+extended token resolver are verified against this client's ClassicAPI sources.
+One live unit lookup supplies validation and the existing projection math.
+Current=1/projected=0 describes a current unit whose model cannot project;
+stale associations or faults produce all zeroes. No native pointers survive the
+computation phase. Input is copied before native reads; successful page checks
+are shared only within that phase. Whole-call failure leaves output unchanged;
+empty/shrinking output, Lua 5.0 stored lengths, aliasing and reentry follow the
+existing batch contract. The version-1 projection API is unchanged.
+
+Production native tests cover scalar parity, live camera changes, all association
+checks, missing models, native faults, reentry, bounds and 10,000 warm batches.
+Lua fixtures exercise both render branches and older-DLL/failure fallbacks.
+A full client restart loads the new DLL; work counts do not establish live FPS.
+
+Version 3.0 adds a nameplate-specific sight batch:
+
+```lua
+supported = zAPI("nameplateSightVersion") -- 1
+count = zAPI("nameplateSightInto", privateGuidArray, inputCount, privateOutput)
+calls, rows, traces, hits, growths, capacity = zAPI("nameplateSightStats")
+```
+
+Up to 512 strict GUID strings produce one dense output each: `1` clear, `0`
+blocked, `-1` unknown. A whole-call failure returns nil and leaves output
+unchanged. Empty/shrinking successful calls clear the tail and update Lua 5.0's
+stored length. Arrays may alias; each invocation owns its scratch through Lua
+output/reentry. Private scratch capacity is retained up to 512 rows.
+
+The player is resolved/read once per batch. Every target is resolved live, even
+on result-cache hits. Sight geometry matches the retained UnitXP implementation:
+first trace at the shorter unit's CMovement collision height, then (only when
+blocked and heights differ) a head-to-head trace. The query mask is `0x100111`,
+intersection bounds include 0 and 1, and UnitXP's 150-yard/epsilon guards apply.
+The existing `lineOfSight`, pet and terrain commands retain their contracts.
+
+A fixed 512-slot direct-mapped cache stores only source/target GUIDs, result and
+timestamps. Collisions evict entries. Results expire after 100–160 ms with
+deterministic GUID dither (UnitXP uses random dither in the same range). One
+high-resolution clock read is shared by the batch. Missing units and faults are
+unknown; only valid results are cached. SEH and successful page checks are scoped
+to the native phase; no object, movement or model pointer survives a call.
+No new hook, object-list scan, forced collection or GC setting is introduced.
+
+Production native tests compare 1,600 geometry cases with the retained UnitXP
+source, including every ray endpoint/mask. They also cover expiry, source
+identity, disappearing units, faults, strict inputs, reentry, output ownership,
+Lua 5.0 lengths and 10,000 warm batches. Lua integration fixtures preserve due
+sample counts/fades/scales/anchors while replacing 5,050 individual calls with
+601 batches (50 plates, ten seconds, normal cadence), or 2,550 calls with 401
+batches for background-friendly plates. These are offline work counts; live
+timings require another capture after a full client restart.
+
 `projectLine` is the zAPI 1.5 atomic projection path. It resolves both unit
 positions and projects them against one camera capture. If the target is behind
 the near plane, its screen coordinate becomes a synthetic point along the same

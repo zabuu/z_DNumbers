@@ -2,7 +2,10 @@
 // enumeration, cached object pointers, or alternate anchor/coordinate math.
 constexpr int kNameplateBatchLimit = 512;
 constexpr int kNameplateBatchStride = 7;
-struct NameplateBatchRow { float values[kNameplateBatchStride]{}; };
+struct NameplateBatchRow {
+  float values[kNameplateBatchStride]{};
+  char guid[19]{};
+};
 std::vector<NameplateBatchRow> g_nameplateBatchScratch;
 uint64_t g_nameplateBatchCalls = 0, g_nameplateBatchRows = 0;
 uint64_t g_nameplateBatchGrowths = 0;
@@ -71,8 +74,17 @@ int DoProjectNameplatesInto(void *L) {
     // invokes no __index; strict strings avoid number-to-string allocations.
     At<FrameScriptPushObjectFn>(kFrameScriptPushObject)(L, 2, i + 1);
     const char *guid = LuaType(L, -1) == 4 ? LuaToString(L, -1) : nullptr;
-    if (IsBatchGuid(guid)) ProjectBatchNameplate(guid, camera, forward, viewport, rows[i]);
+    if (IsBatchGuid(guid)) std::memcpy(rows[i].guid, guid, sizeof(rows[i].guid));
     At<LuaSetTopFn>(kLuaSetTop)(L, -2);
+  }
+  {
+    // Consume all Lua input first, then share page-readability validation only
+    // through the native projection phase. Addresses/contents remain live;
+    // SEH still guards every model projection. Drop page views before Lua output
+    // can allocate, collect, or reenter the API. Nothing survives this batch.
+    ScopedReadableRegions readable;
+    for (auto &row : rows)
+      if (row.guid[0]) ProjectBatchNameplate(row.guid, camera, forward, viewport, row);
   }
   ++g_nameplateBatchCalls;
   g_nameplateBatchRows += count;

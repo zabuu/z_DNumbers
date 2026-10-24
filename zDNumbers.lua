@@ -209,12 +209,12 @@ local function IsPetAnimation(animationEvent)
     and string.find(animationEvent.EventType, "^MSBT_EVENTTYPE_OUTGOING_PET_") ~= nil
 end
 
-local function NativeProject(record, verticalOffset)
+local function NativeProject(record, verticalOffset, now)
   if type(zAPI) ~= "function" or not record then return end
   local identifier = record.guid or record.unit
   if not identifier then return end
   verticalOffset = verticalOffset or 0
-  local now = GetTime()
+  now = now or GetTime()
   local sample = record.nativeProjectionSample
   if not sample then sample = {}; record.nativeProjectionSample = sample end
   if verticalOffset == 0 and sample.time == now and sample.api == zAPI and sample.identifier == identifier then
@@ -1048,21 +1048,33 @@ local function RetireAnimationItem(item)
   SetSourceIconShown(item.result, false)
 end
 
-local function NativeAnimationPlacement(record, item, anchor, height)
+local function NativeAnimationPlacement(record, item, anchor, height, render)
   item.nativeScreenDepth = nil
   if not item.native3D or not UIParent or not UIParent.GetWidth
       or not UIParent.GetHeight then return end
   local progress = math.max(0, math.min(1, (item.displayPosition or item.position) / height))
   local worldOffset = progress * (item.nativeTravel or NATIVE_DEFAULT_TRAVEL)
 
-  local baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ
-  if not record.frozen then baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ = NativeProject(record, 0) end
+  if render.api~=zAPI or render.ui~=UIParent or render.identity~=(record.guid or record.unit)
+      or render.frozen~=record.frozen then
+    render.baseReady,render.geometryReady=nil,nil
+    render.api,render.ui,render.identity,render.frozen=zAPI,UIParent,record.guid or record.unit,record.frozen
+  end
+  if not render.baseReady then
+    render.baseX,render.baseY,render.baseDepth,render.wx,render.wy,render.wz=nil,nil,nil,nil,nil,nil
+    if not record.frozen then
+      render.baseX,render.baseY,render.baseDepth,render.wx,render.wy,render.wz=NativeProject(record,0,render.now)
+    end
+    render.baseReady=true
+  end
+  local baseX, baseY, baseDepth, baseWorldX, baseWorldY, baseWorldZ=
+    render.baseX,render.baseY,render.baseDepth,render.wx,render.wy,render.wz
   local pointX, pointY, pointDepth, pointWorldX, pointWorldY, pointWorldZ
   if baseX and baseWorldX and baseWorldY and baseWorldZ then
     pointWorldX, pointWorldY, pointWorldZ = baseWorldX, baseWorldY, baseWorldZ + worldOffset
     pointX, pointY, pointDepth = NativeWorldToScreen(pointWorldX, pointWorldY, pointWorldZ)
   elseif baseX then
-    pointX, pointY, pointDepth, pointWorldX, pointWorldY, pointWorldZ = NativeProject(record, worldOffset)
+    pointX, pointY, pointDepth, pointWorldX, pointWorldY, pointWorldZ = NativeProject(record, worldOffset, render.now)
   end
 
   if baseX and pointX then
@@ -1082,10 +1094,15 @@ local function NativeAnimationPlacement(record, item, anchor, height)
   end
   if not baseX or not pointX then return end
 
-  local uiWidth = UIParent:GetWidth()
-  local uiHeight = UIParent:GetHeight()
+  if not render.geometryReady then
+    render.width,render.height=UIParent:GetWidth(),UIParent:GetHeight()
+    render.originX,render.originY=nil,nil
+    if not record.frozen then render.originX,render.originY=FrameBottomAnchor(record.frame,anchor) end
+    render.geometryReady=true
+  end
+  local uiWidth,uiHeight=render.width,render.height
   if not record.frozen then
-    local originX, originY = FrameBottomAnchor(record.frame, anchor)
+    local originX, originY = render.originX,render.originY
     if originX and originY then
       item.nativeCorrectionX = originX - baseX * uiWidth
       item.nativeCorrectionY = originY - baseY * uiHeight
@@ -1507,6 +1524,9 @@ local function UpdateAnimations(record, now)
   else frame.petZipper = nil end
   ResolveAnimationSpacing(frame, height, spacingElapsed, frame.petZipper)
 
+  local render=record.animationRender
+  if not render then render={}; record.animationRender=render end
+  render.now,render.baseReady,render.geometryReady=now,nil,nil
   local anyActive, hasMain
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
@@ -1520,7 +1540,7 @@ local function UpdateAnimations(record, now)
       end
       -- Restore the unwarped glyph vertices before a possible text-height
       -- rebuild, then apply the current frame's perspective after layout.
-      local nativeX, nativeY = NativeAnimationPlacement(record, item, anchor, height)
+      local nativeX, nativeY = NativeAnimationPlacement(record, item, anchor, height, render)
       local textHeight = math.max(1, nativeX and (item.visualSize or item.fontSize or 12) or (item.fontSize or 12))
       if not item.appliedTextHeight or math.abs(textHeight-item.appliedTextHeight) > .001 then
         SetTextPerspective(item, 0)

@@ -174,8 +174,11 @@ T At(uintptr_t preferredAddress) {
   }
 }
 
+#include "ReadableRegionCache.h"
+
 bool IsReadable(uintptr_t address, size_t bytes) {
   if (address == 0 || bytes == 0) return false;
+  if (g_readableRegionCache && g_readableRegionCache->Contains(address, bytes)) return true;
   MEMORY_BASIC_INFORMATION info{};
   if (VirtualQuery(reinterpret_cast<void *>(address), &info, sizeof(info)) == 0)
     return false;
@@ -183,7 +186,9 @@ bool IsReadable(uintptr_t address, size_t bytes) {
     return false;
   const uintptr_t end = address + bytes;
   const uintptr_t regionEnd = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
-  return end >= address && end <= regionEnd;
+  const bool readable = end >= address && end <= regionEnd;
+  if (readable && g_readableRegionCache) g_readableRegionCache->Remember(info);
+  return readable;
 }
 
 bool CompatibleClient() {
@@ -942,6 +947,8 @@ bool ProjectWorld(const Vec3 &world, float &x, float &y, float &depth) {
 }
 
 #include "NameplateBatch.h"
+#include "NameplateValidatedBatch.h"
+#include "NameplateSight.h"
 
 bool SunLight(Vec3 &lightDir, float &diffuseR, float &diffuseG, float &diffuseB,
               float &ambientR, float &ambientG, float &ambientB) {
@@ -1262,11 +1269,33 @@ int __fastcall Script_zAPI(void *L) {
   }
 
   if (std::strcmp(command, "version") == 0) {
-    LuaPushNumber(L, 2.8);
+    LuaPushNumber(L, 3.1);
     return 1;
   }
 
   if (std::strcmp(command, "nameplateBatchVersion") == 0) { LuaPushNumber(L, 1); return 1; }
+  if (std::strcmp(command, "nameplateValidationVersion") == 0) { LuaPushNumber(L, 1); return 1; }
+  if (std::strcmp(command, "projectNameplatesValidatedInto") == 0) return DoValidatedPlateProjections(L);
+  if (std::strcmp(command, "nameplateValidationStats") == 0) {
+    LuaPushNumber(L, static_cast<double>(g_validatedPlateCalls));
+    LuaPushNumber(L, static_cast<double>(g_validatedPlateRows));
+    LuaPushNumber(L, static_cast<double>(g_validatedPlateCurrent));
+    LuaPushNumber(L, static_cast<double>(g_validatedPlateProjected));
+    LuaPushNumber(L, static_cast<double>(g_validatedPlateGrowths));
+    LuaPushNumber(L, static_cast<double>(g_validatedPlateScratch.capacity()));
+    return 6;
+  }
+  if (std::strcmp(command, "nameplateSightVersion") == 0) { LuaPushNumber(L, 1); return 1; }
+  if (std::strcmp(command, "nameplateSightInto") == 0) return DoNameplateSightInto(L);
+  if (std::strcmp(command, "nameplateSightStats") == 0) {
+    LuaPushNumber(L, static_cast<double>(g_nameplateSightCalls));
+    LuaPushNumber(L, static_cast<double>(g_nameplateSightRows));
+    LuaPushNumber(L, static_cast<double>(g_nameplateSightTraces));
+    LuaPushNumber(L, static_cast<double>(g_nameplateSightHits));
+    LuaPushNumber(L, static_cast<double>(g_nameplateSightGrowths));
+    LuaPushNumber(L, static_cast<double>(g_nameplateSightScratch.capacity()));
+    return 6;
+  }
   if (std::strcmp(command, "projectNameplatesInto") == 0) return DoProjectNameplatesInto(L);
   if (std::strcmp(command, "nameplateBatchStats") == 0) {
     LuaPushNumber(L, static_cast<double>(g_nameplateBatchCalls));

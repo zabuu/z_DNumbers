@@ -20,6 +20,7 @@ prefix = r'''
 #include <Windows.h>
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -66,6 +67,21 @@ void __fastcall SetN(void *p,int index,int n) { slot(p,index).table->length=n; }
 void LuaRawSetI(void *,int,int);
 '''
 
+# Compile the real memory-validation implementation too. Only the Windows query
+# is counted; fixture reads use actual committed/protected pages in this process.
+prefix += r'''
+bool usePageCache=true;
+int pageQueries=0;
+SIZE_T CountedVirtualQuery(LPCVOID p, PMEMORY_BASIC_INFORMATION info, SIZE_T n) {
+  ++pageQueries; return VirtualQuery(p,info,n);
+}
+char *memoryFixture=nullptr;
+'''
+prefix += (native / "ReadableRegionCache.h").read_text(encoding="utf-8-sig")
+prefix += section("bool IsReadable(", "bool CompatibleClient(").replace(
+    "VirtualQuery(", "CountedVirtualQuery("
+).replace("g_readableRegionCache", "(usePageCache ? g_readableRegionCache : nullptr)")
+
 types = section("struct Vec3 {", "using LuaCFunction")
 viewport = section("struct ProjectionViewport {", "bool ReadProjectionViewport(")
 fake_client = r'''
@@ -103,9 +119,12 @@ bool ReadProjectionViewport(ProjectionViewport &v) {
   ++viewportReads; v.frame=123; v.left=.1f; v.bottom=.2f; return viewportReady;
 }
 bool ResolveUnit(const char *text,uint32_t &unit) {
+  assert(IsReadable(reinterpret_cast<uintptr_t>(memoryFixture),16));
   ++resolves; unit=uint32_t(std::strtoull(text+2,nullptr,16)); return unit!=0 && unit!=88;
 }
 bool UnitNameplatePosition(uint32_t unit,Vec3 &world) {
+  for(int i=0;i<7;++i)
+    assert(IsReadable(reinterpret_cast<uintptr_t>(memoryFixture)+unit*16+i,4));
   ++models;
   if(unit==99) RaiseException(EXCEPTION_ACCESS_VIOLATION,0,0,nullptr);
   if(unit==77) return false;
@@ -121,6 +140,7 @@ void fill(FakeLua &l,int n) {
   l.input->length=n; l.reset(n);
 }
 void LuaRawSetI(void *p,int index,int key) {
+  assert(g_readableRegionCache==nullptr); // No page views across Lua allocation/reentry.
   auto &l=*static_cast<FakeLua *>(p); auto t=slot(p,index).table;
   Value value=l.stack.back(); l.stack.pop_back();
   if(reenter) {
@@ -140,6 +160,23 @@ void rejected(FakeLua &l) {
   assert(l.output->array.size()==size && l.output->length==length);
 }
 int main() {
+  memoryFixture=static_cast<char *>(VirtualAlloc(nullptr,65536,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
+  assert(memoryFixture);
+  const auto address=reinterpret_cast<uintptr_t>(memoryFixture);
+  assert(!IsReadable(0,4) && !IsReadable(address,0) && !IsReadable(UINTPTR_MAX-1,8));
+  {
+    ScopedReadableRegions outer; auto *saved=g_readableRegionCache;
+    assert(IsReadable(address,16)); const int warm=pageQueries;
+    for(int i=0;i<100;++i) assert(IsReadable(address+32,4));
+    assert(pageQueries==warm);
+    { ScopedReadableRegions inner; assert(g_readableRegionCache!=saved); assert(IsReadable(address,4)); }
+    assert(g_readableRegionCache==saved && IsReadable(address,4));
+  }
+  assert(g_readableRegionCache==nullptr);
+  DWORD old=0; assert(VirtualProtect(memoryFixture,65536,PAGE_NOACCESS,&old));
+  assert(!IsReadable(address,4)); // A new batch never inherits stale permissions.
+  { ScopedReadableRegions fresh; assert(!IsReadable(address,4)); }
+  assert(VirtualProtect(memoryFixture,65536,PAGE_READWRITE,&old));
   FakeLua l; fill(l,50); check(l,50);
   assert(cameraReads==1 && viewportReads==1 && resolves==50 && models==50 && projections==50);
   // Compare every native result with the actual unchanged single-unit helper.
@@ -186,6 +223,18 @@ int main() {
   assert(l.output->array.empty() && l.output->length==0);
   // Inputs are fully consumed before output, even for aliased caller tables.
   l.input=l.output; fill(l,5); check(l,5); assert(l.output->array.at(4).number==21);
+  // Isolate validation costs with real VirtualQuery, unchanged model/projection
+  // fixtures and the production batch code. This is not a WoW FPS benchmark.
+  l.output=std::make_shared<Table>(); fill(l,50);
+  for(bool cached:{false,true}) {
+    usePageCache=cached; pageQueries=0;
+    auto started=std::chrono::steady_clock::now();
+    for(int i=0;i<2000;++i) { l.reset(50); check(l,50); }
+    const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count()/2000;
+    assert(pageQueries==(cached?2000:800000));
+    std::printf("BENCH 50-row native fixture cache=%d: %.6f ms/batch; %.1f VirtualQuery/batch\n",cached,ms,pageQueries/2000.0);
+  }
+  VirtualFree(memoryFixture,0,MEM_RELEASE);
   puts("PASS native projection parity, one camera/viewport capture, live camera, gaps/faults, bounds, strict inputs, unchanged failures, reentry and Lua 5.0 shrink/empty lengths");
   puts("PASS 10,000 warm 50-unit batches: zero additional scratch growth; retained native capacity <=512; no per-row Lua tables");
 }
