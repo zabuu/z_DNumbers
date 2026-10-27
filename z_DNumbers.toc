@@ -2,7 +2,7 @@
 ## Title: |cff7dff33z|rDNumbers
 ## Author: zDNumbers contributors; MSBT by Mikord
 ## Notes: MSBT-powered outgoing damage attached to any visible nameplate.
-## Version: 1.0.1
+## Version: 1.0.2
 ## OptionalDeps: z_Nameplates, pfUI, SW_FixLogStrings
 ## SavedVariables: MikSBT_Save
 ## SavedVariablesPerCharacter: zDNumbersDB
@@ -34,4 +34,5 @@ msbt_skin.lua
 
 embedded_msbt.lua
 zDNumbers.lua
+paired_damage.lua
 options.lua

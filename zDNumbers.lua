@@ -954,6 +954,7 @@ local function AddAnimation(record, animationEvent)
   local anchor, justify = Alignment()
   slot.active = true
   slot.isPet = isPet
+  slot.petSourceGUID = animationEvent.PetSourceGUID
   slot.fallbackEvent = nil
   if record.petOwner then
     -- MSBT recycles the source event immediately after this callback. Retain
@@ -1264,11 +1265,11 @@ local function AnimationBounds(item, anchor, x, y, scale)
   return left - warpPadding - scale, right + warpPadding + scale, bottom - scale, top + scale
 end
 
-local function NativePetOrbit(record, frame, now, elapsed)
+local function NativePetOrbit(record, frame, now, elapsed, sourceGUID)
   local reference
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
-    if item and item.active and item.isPet then
+    if item and item.active and item.isPet and item.petSourceGUID==sourceGUID then
       if not item.native3D
           or not item.nativeBaseX or not item.nativeBaseY or not item.nativeBaseZ then return end
       reference = reference or item
@@ -1285,7 +1286,12 @@ local function NativePetOrbit(record, frame, now, elapsed)
   if not baseX or not worldX or not worldY or not worldZ then return end
   local yaw = frame.petStreamYaw
   local petX, petY
-  if not record.frozen then petX, petY = PetWorldPosition(now) end
+  if not record.frozen then
+    if sourceGUID and type(zAPI)=="function" then
+      local ok,x,y=pcall(zAPI,"unitPosition",sourceGUID)
+      if ok and type(x)=="number" and type(y)=="number" then petX,petY=x,y end
+    elseif not sourceGUID then petX, petY = PetWorldPosition(now) end
+  end
   if petX and petY then
     local dx, dy = petX - worldX, petY - worldY
     if dx * dx + dy * dy > .1 * .1 then
@@ -1326,12 +1332,17 @@ local function NativePetOrbit(record, frame, now, elapsed)
   return orbit
 end
 
-local function PetStreamPlacement(frame, now, frozen, originX)
+local function PetStreamPlacement(frame, now, frozen, originX, sourceGUID)
   -- A screen-only fallback cannot recover world yaw. Keep its baseline level
   -- and use left/right instead of mistaking pet elevation for an orbit angle.
   local direction = math.cos(frame.petStreamAngle or 0) < 0 and -1 or 1
   local petX
-  if not frozen then petX = PetScreenPosition(now) end
+  if not frozen then
+    if sourceGUID and type(zAPI)=="function" then
+      local ok,x,y,depth=pcall(zAPI,"projectUnit",sourceGUID,0)
+      if ok and type(x)=="number" and type(depth)=="number" and depth>0 and x>=0 and x<=1 then petX=x*UIParent:GetWidth() end
+    elseif not sourceGUID then petX=PetScreenPosition(now) end
+  end
   local dx = petX and petX - originX
   if dx and math.abs(dx) > 16 then direction = dx < 0 and -1 or 1 end
   frame.petStreamAngle = direction < 0 and math.pi or 0
@@ -1449,10 +1460,17 @@ local function PlacePetNumber(frame, item, orbit, now, elapsed, hasMain, originX
 end
 
 local function PetAnchorVisible(record, now)
-  if not UnitExists or not UnitExists("pet") then return end
-  local guid=UnitGUID and UnitGUID("pet")
+  local unit=record.pairedOwner and record.sourceGUID or "pet"
+  if record.pairedOwner then
+    local ok,current=pcall(Z.pairedDamageSource or function() end)
+    if not ok or current~=unit then return end
+  end
+  if not UnitExists then return end
+  local exists,loaded=pcall(UnitExists,unit)
+  if not exists or not loaded then return end
+  local guid=record.pairedOwner and unit or (UnitGUID and UnitGUID("pet"))
   if record.guid and guid and record.guid~=guid then return end
-  record.unit,record.guid="pet",guid
+  record.unit,record.guid=unit,guid
   local x,y,depth=NativeProject(record,0)
   if not x or x<0 or x>1 or y<0 or y>1 or depth<=0 then return end
   record.frame:SetPoint("BOTTOM",UIParent,"BOTTOMLEFT",
@@ -1495,7 +1513,7 @@ local function UpdateAnimations(record, now)
   local iconAlpha = SourceIconAlpha()
   -- Move first, resolve collisions second, and render last. Keeping those
   -- phases separate prevents mixed crit/normal sizes from crossing visually.
-  local hasPet
+  local hasPet,pairedSource
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
     if item and item.active then
@@ -1504,7 +1522,9 @@ local function UpdateAnimations(record, now)
       if item.position >= height then
         RetireAnimationItem(item)
       end
-      if item.active and item.isPet then hasPet = true end
+      if item.active and item.isPet then
+        if item.petSourceGUID then pairedSource=item.petSourceGUID else hasPet=true end
+      end
     end
   end
 
@@ -1522,6 +1542,15 @@ local function UpdateAnimations(record, now)
     petOrbit = NativePetOrbit(record, frame, now, spacingElapsed)
       or PetStreamPlacement(frame, now, record.frozen, originX)
   else frame.petZipper = nil end
+  local pairedOrbit
+  if split and pairedSource then
+    local geometry=frame.pairedPetGeometry
+    if not geometry or geometry.sourceGUID~=pairedSource then geometry={sourceGUID=pairedSource};frame.pairedPetGeometry=geometry end
+    geometry.items=frame.items
+    pairedOrbit=NativePetOrbit(record,geometry,now,spacingElapsed,pairedSource) or
+      PetStreamPlacement(geometry,now,record.frozen,originX,pairedSource)
+    if not hasPet then frame.petZipper=geometry.petZipper end
+  end
   ResolveAnimationSpacing(frame, height, spacingElapsed, frame.petZipper)
 
   local render=record.animationRender
@@ -1573,11 +1602,11 @@ local function UpdateAnimations(record, now)
   end
   frame.petStreamOffset, frame.petStreamOffsetY, frame.petStreamRadius = nil, nil, nil
   frame.petStreamWorldX, frame.petStreamWorldY, frame.petStreamWorldZ = nil, nil, nil
-  if petOrbit then
+  if petOrbit or pairedOrbit then
     for i = 1, frame.collisionLayoutCount or 0 do
       local item = frame.collisionLayout[i]
       if item.active and item.isPet then
-        PlacePetNumber(frame, item, petOrbit, now, spacingElapsed, hasMain, originX, originY, scale)
+        PlacePetNumber(frame, item, item.petSourceGUID and pairedOrbit or petOrbit, now, spacingElapsed, hasMain, originX, originY, scale)
         if not frame.petStreamOffset then
           frame.petStreamOffset, frame.petStreamOffsetY, frame.petStreamRadius =
             item.petOffsetX, item.petOffsetY, item.petOrbitRadius
@@ -1615,15 +1644,18 @@ end
 local function HandleOutgoing(animationEvent)
   local targetGuid = animationEvent.TargetGUID or ConsumeGuidHint(animationEvent)
   if IsPetAnimation(animationEvent) and Z.config.split_pet=="1" and Z.config.pet_anchor~="TARGET" then
-    local record=Z.petRecord
+    local source=animationEvent.PetSourceGUID
+    local record=source and Z.pairedPetRecord or Z.petRecord
     if not record then
       local frame=CreateFrame("Frame",nil,UIParent)
       frame:SetFrameStrata("TOOLTIP"); frame:SetFrameLevel(100); frame.items={}; frame:Hide()
-      record={petOwner=true,frame=frame}; Z.petRecord=record
+      record={petOwner=true,pairedOwner=source~=nil,sourceGUID=source,frame=frame}
+      if source then Z.pairedPetRecord=record else Z.petRecord=record end
     end
-    if record.guid and UnitGUID and record.guid~=UnitGUID("pet") then
+    if record.guid and record.guid~=(source or (UnitGUID and UnitGUID("pet"))) then
       FallBackPetAnimations(record); record.guid=nil; record.nativeProjectionSample=nil
     end
+    record.sourceGUID=source
     ConfigureRecord(record)
     if not PetAnchorVisible(record,GetTime()) then return false end
     if MikSBT.PrepareExternalAnimationEvent(animationEvent) then AddAnimation(record,animationEvent) end
@@ -1730,6 +1762,11 @@ function Z.Refresh()
     ConfigureRecord(Z.petRecord)
     if not Enabled() or Z.config.split_pet~="1" or Z.config.pet_anchor=="TARGET" then ClearAnimations(Z.petRecord) end
   end
+  if Z.pairedPetRecord then
+    Z.pairedPetRecord.nativeProjectionSample=nil
+    ConfigureRecord(Z.pairedPetRecord)
+    if not Enabled() or Z.config.split_pet~="1" or Z.config.pet_anchor=="TARGET" then ClearAnimations(Z.pairedPetRecord) end
+  end
   ScanVisibleNameplates()
   for record in pairs(visibleRecords) do
     ConfigureRecord(record)
@@ -1780,6 +1817,7 @@ eventFrame:SetScript("OnEvent", function()
     return
   elseif event == "PLAYER_ENTERING_WORLD" then
     if Z.petRecord then ClearAnimations(Z.petRecord); Z.petRecord.guid=nil; Z.petRecord.nativeProjectionSample=nil end
+    if Z.pairedPetRecord then ClearAnimations(Z.pairedPetRecord); Z.pairedPetRecord.guid=nil; Z.pairedPetRecord.nativeProjectionSample=nil end
     Z.EnsureEmbeddedMSBT()
     RegisterMSBTIntegration()
     cachedWorldChildCount = -1

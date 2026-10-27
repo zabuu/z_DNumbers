@@ -834,7 +834,8 @@ function MikSBT.MergeEvents(mergeData, numEvents)
       (mergeData.UnmergedEvents[x].TargetGUID ~= nil and animationEvent.TargetGUID ~= nil and
        mergeData.UnmergedEvents[x].TargetGUID == animationEvent.TargetGUID);
     if ((mergeData.UnmergedEvents[x].EventType == animationEvent.EventType) and
-        (mergeData.UnmergedEvents[x].EffectName == animationEvent.EffectName) and sameNameplateTarget) then
+        (mergeData.UnmergedEvents[x].EffectName == animationEvent.EffectName) and sameNameplateTarget and
+        mergeData.UnmergedEvents[x].PetSourceGUID==animationEvent.PetSourceGUID) then
      -- Keep result-marked and ordinary hits separate so their right-side
      -- glancing, parry, and block icons survive MSBT's short merge window.
      if (mergeData.UnmergedEvents[x].IsGlancing ~= animationEvent.IsGlancing or
@@ -1732,6 +1733,22 @@ function MikSBT.DispatchAnimationEvent(animationEvent)
  local nameplateOutgoing = MikSBT.IsOutgoingNameplateHandlerActive() and
   MikSBT.IsOutgoingNameplateEvent(animationEvent);
  if (nameplateOutgoing) then MikSBT.ResolveOutgoingNameplateTarget(animationEvent); end
+
+ -- The observer borrows this unrecycled, unmerged event; ownership stays here.
+ -- Observe before local display filters so the other client uses its profile.
+ -- Relayed pet events cannot feed back into the player-outgoing observer.
+ local observeDamage=type(MikSBT.OutgoingDamageObserver)=="function";
+ if observeDamage and type(MikSBT.OutgoingDamageObserverActive)=="function" then
+  local ok,active=pcall(MikSBT.OutgoingDamageObserverActive);observeDamage=ok and active;
+ end
+ if (observeDamage and
+     type(animationEvent.EventType)=="string" and
+     string.find(animationEvent.EventType,"^MSBT_EVENTTYPE_OUTGOING_") and
+     not string.find(animationEvent.EventType,"^MSBT_EVENTTYPE_OUTGOING_PET_") and
+     MikSBT.IsOutgoingNameplateEvent(animationEvent)) then
+  MikSBT.ResolveOutgoingNameplateTarget(animationEvent);
+  pcall(MikSBT.OutgoingDamageObserver,animationEvent);
+ end
 
  -- Check if the event is to be shown.
  if (animationEvent.EventSettings.Show and (animationEvent.ScrollArea.DisplaySettings.Show or nameplateOutgoing)) then
@@ -3051,6 +3068,26 @@ function MikSBT.PrepareExternalAnimationEvent(animationEvent)
   end
  end
  return true;
+end
+
+-- Optional zBox adapter: use this client's pet styles and normal renderer.
+-- No remote style tables, Lua, or formatted display strings are accepted.
+function MikSBT.SubmitPairedPetDamage(data,sourceGUID)
+ if type(data)~="table" or type(sourceGUID)~="string" or not MikSBT.CurrentProfile then return false; end
+ local suffix=data.Kind;
+ if type(suffix)~="string" or not string.find(suffix,"^[A-Z_]+$") then return false; end
+ local eventType="MSBT_EVENTTYPE_OUTGOING_PET_"..suffix;
+ local settings=MikSBT.CurrentProfile.EventSettings[eventType];
+ if not settings and suffix=="SPELL_DOT" then
+  eventType="MSBT_EVENTTYPE_OUTGOING_PET_SPELL_DAMAGE";settings=MikSBT.CurrentProfile.EventSettings[eventType];
+ end
+ if not settings then return false; end
+ local e=eventsRecycler:AcquireTable();
+ e.ScrollArea=scrollAreas.PetOutgoing;e.EventType=eventType;e.EventSettings=settings;e.UnformattedText=settings.Message;
+ e.Amount=data.Amount;e.Name=data.Name;e.EffectName=data.EffectName;e.DamageType=data.DamageType;
+ e.IsCrit=data.IsCrit;e.IsGlancing=data.IsGlancing;e.IsBlocked=data.IsBlocked;e.IsParried=data.IsParried;
+ e.TargetGUID=data.TargetGUID;e.PetSourceGUID=sourceGUID;e.SpellID=data.SpellID;e.Texture=data.Texture;
+ MikSBT.DispatchAnimationEvent(e);return true;
 end
 
 -- **********************************************************************************
