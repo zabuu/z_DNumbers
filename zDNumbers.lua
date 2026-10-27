@@ -1462,7 +1462,7 @@ end
 local function PetAnchorVisible(record, now)
   local unit=record.pairedOwner and record.sourceGUID or "pet"
   if record.pairedOwner then
-    local ok,current=pcall(Z.pairedDamageSource or function() end)
+    local ok,current=pcall(Z.pairedDamageSource or function() end,unit)
     if not ok or current~=unit then return end
   end
   if not UnitExists then return end
@@ -1513,7 +1513,9 @@ local function UpdateAnimations(record, now)
   local iconAlpha = SourceIconAlpha()
   -- Move first, resolve collisions second, and render last. Keeping those
   -- phases separate prevents mixed crit/normal sizes from crossing visually.
-  local hasPet,pairedSource
+  local hasPet
+  local pairedSources=frame.pairedSources or {};frame.pairedSources=pairedSources
+  for source in pairs(pairedSources) do pairedSources[source]=nil end
   for i = 1, TEXT_SLOTS do
     local item = frame.items[i]
     if item and item.active then
@@ -1523,7 +1525,7 @@ local function UpdateAnimations(record, now)
         RetireAnimationItem(item)
       end
       if item.active and item.isPet then
-        if item.petSourceGUID then pairedSource=item.petSourceGUID else hasPet=true end
+        if item.petSourceGUID then pairedSources[item.petSourceGUID]=true else hasPet=true end
       end
     end
   end
@@ -1543,14 +1545,20 @@ local function UpdateAnimations(record, now)
       or PetStreamPlacement(frame, now, record.frozen, originX)
   else frame.petZipper = nil end
   local pairedOrbit
-  if split and pairedSource then
-    local geometry=frame.pairedPetGeometry
-    if not geometry or geometry.sourceGUID~=pairedSource then geometry={sourceGUID=pairedSource};frame.pairedPetGeometry=geometry end
+  frame.pairedPetGeometries=frame.pairedPetGeometries or {}
+  frame.pairedPetOrbits=frame.pairedPetOrbits or {}
+  for source in pairs(frame.pairedPetOrbits) do frame.pairedPetOrbits[source]=nil end
+  if split then for source in pairs(pairedSources) do
+    local geometry=frame.pairedPetGeometries[source]
+    if not geometry then geometry={sourceGUID=source};frame.pairedPetGeometries[source]=geometry end
+    frame.pairedPetGeometry=geometry -- compatibility for single-source integrations
     geometry.items=frame.items
-    pairedOrbit=NativePetOrbit(record,geometry,now,spacingElapsed,pairedSource) or
-      PetStreamPlacement(geometry,now,record.frozen,originX,pairedSource)
+    local orbit=NativePetOrbit(record,geometry,now,spacingElapsed,source) or
+      PetStreamPlacement(geometry,now,record.frozen,originX,source)
+    frame.pairedPetOrbits[source]=orbit
+    pairedOrbit=pairedOrbit or orbit
     if not hasPet then frame.petZipper=geometry.petZipper end
-  end
+  end end
   ResolveAnimationSpacing(frame, height, spacingElapsed, frame.petZipper)
 
   local render=record.animationRender
@@ -1606,7 +1614,7 @@ local function UpdateAnimations(record, now)
     for i = 1, frame.collisionLayoutCount or 0 do
       local item = frame.collisionLayout[i]
       if item.active and item.isPet then
-        PlacePetNumber(frame, item, item.petSourceGUID and pairedOrbit or petOrbit, now, spacingElapsed, hasMain, originX, originY, scale)
+        PlacePetNumber(frame, item, item.petSourceGUID and frame.pairedPetOrbits[item.petSourceGUID] or petOrbit, now, spacingElapsed, hasMain, originX, originY, scale)
         if not frame.petStreamOffset then
           frame.petStreamOffset, frame.petStreamOffsetY, frame.petStreamRadius =
             item.petOffsetX, item.petOffsetY, item.petOrbitRadius
@@ -1645,12 +1653,14 @@ local function HandleOutgoing(animationEvent)
   local targetGuid = animationEvent.TargetGUID or ConsumeGuidHint(animationEvent)
   if IsPetAnimation(animationEvent) and Z.config.split_pet=="1" and Z.config.pet_anchor~="TARGET" then
     local source=animationEvent.PetSourceGUID
-    local record=source and Z.pairedPetRecord or Z.petRecord
+    Z.pairedPetRecords=Z.pairedPetRecords or {}
+    local record
+    if source then record=Z.pairedPetRecords[source] else record=Z.petRecord end
     if not record then
       local frame=CreateFrame("Frame",nil,UIParent)
       frame:SetFrameStrata("TOOLTIP"); frame:SetFrameLevel(100); frame.items={}; frame:Hide()
       record={petOwner=true,pairedOwner=source~=nil,sourceGUID=source,frame=frame}
-      if source then Z.pairedPetRecord=record else Z.petRecord=record end
+      if source then Z.pairedPetRecords[source]=record;Z.pairedPetRecord=record else Z.petRecord=record end
     end
     if record.guid and record.guid~=(source or (UnitGUID and UnitGUID("pet"))) then
       FallBackPetAnimations(record); record.guid=nil; record.nativeProjectionSample=nil
@@ -1762,10 +1772,10 @@ function Z.Refresh()
     ConfigureRecord(Z.petRecord)
     if not Enabled() or Z.config.split_pet~="1" or Z.config.pet_anchor=="TARGET" then ClearAnimations(Z.petRecord) end
   end
-  if Z.pairedPetRecord then
-    Z.pairedPetRecord.nativeProjectionSample=nil
-    ConfigureRecord(Z.pairedPetRecord)
-    if not Enabled() or Z.config.split_pet~="1" or Z.config.pet_anchor=="TARGET" then ClearAnimations(Z.pairedPetRecord) end
+  for _,record in pairs(Z.pairedPetRecords or {}) do
+    record.nativeProjectionSample=nil
+    ConfigureRecord(record)
+    if not Enabled() or Z.config.split_pet~="1" or Z.config.pet_anchor=="TARGET" then ClearAnimations(record) end
   end
   ScanVisibleNameplates()
   for record in pairs(visibleRecords) do
@@ -1817,7 +1827,7 @@ eventFrame:SetScript("OnEvent", function()
     return
   elseif event == "PLAYER_ENTERING_WORLD" then
     if Z.petRecord then ClearAnimations(Z.petRecord); Z.petRecord.guid=nil; Z.petRecord.nativeProjectionSample=nil end
-    if Z.pairedPetRecord then ClearAnimations(Z.pairedPetRecord); Z.pairedPetRecord.guid=nil; Z.pairedPetRecord.nativeProjectionSample=nil end
+    for _,record in pairs(Z.pairedPetRecords or {}) do ClearAnimations(record);record.guid=nil;record.nativeProjectionSample=nil end
     Z.EnsureEmbeddedMSBT()
     RegisterMSBTIntegration()
     cachedWorldChildCount = -1

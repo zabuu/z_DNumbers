@@ -15,7 +15,7 @@ end
 
 function Z.ShowPairedDamage(data,sourceGUID)
   if not MikSBT or type(Z.pairedDamageSource)~="function" or type(MikSBT.SubmitPairedPetDamage)~="function" then return false end
-  local ok,current=pcall(Z.pairedDamageSource)
+  local ok,current=pcall(Z.pairedDamageSource,sourceGUID)
   if not ok or not current or current~=sourceGUID then return false end
   return MikSBT.SubmitPairedPetDamage(data,sourceGUID)
 end

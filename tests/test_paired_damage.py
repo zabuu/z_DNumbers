@@ -104,3 +104,28 @@ for i=1,2 do q.UnmergedEvents[i]={EventType="MSBT_EVENTTYPE_OUTGOING_PET_DAMAGE"
 MikSBT.MergeEvents(q,2);assert(table.getn(q.MergedEvents)==2)
 ''')
 print('PASS: real MSBT pet-style dispatch, GUID/crit/spell/school metadata, disabled-local-display observer, no echo loop, shared target/independent buddy+pet anchors, off-screen/unlink fallback, source-specific target geometry and non-merging sources')
+
+lua.execute('''
+local second="0x0000000000000033"
+local enabled={[peerGUID]=true,[second]=true}
+zDNumbers.SetPairedDamageSource(function(guid) return enabled[guid] and guid end)
+local exists,api=UnitExists,zAPI
+UnitExists=function(u) if u==second then return true end;return exists(u) end
+zAPI=function(cmd,u,...)
+ if u==second and cmd=="projectUnitForward" then return .8,.4,20,120,200,2 end
+ if u==second and cmd=="unitPosition" then return 120,200,2 end
+ return api(cmd,u,unpack(arg))
+end
+zDNumbers.config.pet_anchor="PET";zDNumbers.config.split_pet="1"
+local function secondHit()
+ return zDNumbers.ShowPairedDamage({Kind="DAMAGE",Amount=456,Name="Mob1",TargetGUID=plates[1].guid},second)
+end
+assert(relay());assert(secondHit());flush();tick(.02)
+local first,other=zDNumbers.pairedPetRecords[peerGUID],zDNumbers.pairedPetRecords[second]
+assert(first and other and first~=other and other~=zDNumbers.petRecord)
+assert(first.sourceGUID==peerGUID and other.sourceGUID==second and count(first.frame)>0 and count(other.frame)>0)
+enabled[peerGUID]=nil;tick(.03)
+assert(count(first.frame)==0 and count(other.frame)>0 and not relay() and secondHit())
+zDNumbers.config.split_pet="0";zDNumbers.Refresh();assert(count(other.frame)==0)
+''')
+print('PASS: concurrent followers retain independent pet anchors alongside a real pet; revoking one source leaves the other active, and refresh clears every follower')
