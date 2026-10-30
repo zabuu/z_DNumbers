@@ -78,6 +78,17 @@ embedded MSBT factory profile: 55% source-icon opacity, 142 px travel height,
 0.65 sec attachment fade delay, 30% perspective depth, Expressway typography,
 and the captured MSBT colors, text speed, scroll areas and notifications.
 Existing character settings and saved MSBT profiles are not overwritten.
+
+Version 1.0.1 shares the current update's base projection, UI dimensions and
+anchor bounds across the numbers belonging to one record. Elevated world
+points still project separately every render, and model gaps, frozen/dead
+records, pet routing, perspective, spacing and fades retain their behavior.
+A 20-number/two-record fixture reduces clock/dimension/anchor reads from 121 to
+11 per update while retaining all 22 camera projections. A 180-frame comparison
+against the preserved renderer matches positions, size, depth and alpha through
+movement, camera changes, resize, alignment, missing models and death. This is
+an offline work count; live gains require another capture. A UI reload loads
+this update; zAPI 3.1 remains sufficient.
 Explicit resets/new MSBT profiles use the new factory preset. Other locales
 fall back to a valid bundled/client font when Expressway is unavailable.
 

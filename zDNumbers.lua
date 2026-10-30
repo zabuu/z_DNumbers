@@ -1281,7 +1281,7 @@ local function NativePetOrbit(record, frame, now, elapsed, sourceGUID)
     worldX, worldY, worldZ = reference.nativeBaseX, reference.nativeBaseY, reference.nativeBaseZ
     baseX, baseY, baseDepth = NativeWorldToScreen(worldX, worldY, worldZ)
   else
-    baseX, baseY, baseDepth, worldX, worldY, worldZ = NativeProject(record, 0)
+    baseX, baseY, baseDepth, worldX, worldY, worldZ = NativeProject(record, 0, now)
   end
   if not baseX or not worldX or not worldY or not worldZ then return end
   local yaw = frame.petStreamYaw
@@ -1471,7 +1471,7 @@ local function PetAnchorVisible(record, now)
   local guid=record.pairedOwner and unit or (UnitGUID and UnitGUID("pet"))
   if record.guid and guid and record.guid~=guid then return end
   record.unit,record.guid=unit,guid
-  local x,y,depth=NativeProject(record,0)
+  local x,y,depth=NativeProject(record,0,now)
   if not x or x<0 or x>1 or y<0 or y>1 or depth<=0 then return end
   record.frame:SetPoint("BOTTOM",UIParent,"BOTTOMLEFT",
     x*UIParent:GetWidth()+(tonumber(Z.config.x) or 0),
