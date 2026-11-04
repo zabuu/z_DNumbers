@@ -9,6 +9,15 @@ It does not require zNameplates or pfUI. It listens to OctoWoW's
 health bar structurally, so it can attach to Blizzard nameplates or another
 nameplate replacement without addon-specific integration.
 
+## Installation
+
+Download or clone this repository into `Interface/AddOns/z_DNumbers` and enable
+**zDNumbers**. Install the shared **[zAPI.dll dependency](https://github.com/zabuu/zAPI#installation)**
+separately for world projection and native text effects. Its installation guide
+names the DLL download, game-root destination, `dlls.txt` entry and restart steps.
+Git/addon-manager installation does not install native DLLs. One shared copy
+serves all zSuite addons; zAPI source and binaries are maintained in that repository.
+
 ## Usage
 
 - `/zdn` or `/zdnumbers` opens attachment, placement, alignment, and fade settings.

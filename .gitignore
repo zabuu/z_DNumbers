@@ -1,0 +1,10 @@
+# Native implementation and binaries are distributed by zabuu/zAPI.
+/native/zAPI/
+/native_reference/
+*.dll
+*.obj
+*.exp
+*.lib
+*.pdb
+__pycache__/
+*.pyc

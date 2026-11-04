@@ -1,3 +1,0 @@
-LIBRARY zAPI
-EXPORTS
-    Load
