@@ -75,7 +75,7 @@ MSBTOriginalEdit:SetScript("OnTextChanged",originalClick)
 MikSBTOpt.ColorSwatchOnClick=function() colorClicked=true end
 MikSBTOpt.ButtonOnClick=function() buttonClicked=true end
 ''')
-lua.execute((root/"msbt_skin.lua").read_text(encoding="utf-8-sig"))
+lua.execute((root/"z_DNumbers_Options/msbt_skin.lua").read_text(encoding="utf-8-sig"))
 lua.execute('''
 Z.StyleMSBTOptions()
 assert(MSBTFrameOptions.width==820 and MSBTFrameOptions.height==560)

@@ -18,6 +18,11 @@ names the DLL download, game-root destination, `dlls.txt` entry and restart step
 Git/addon-manager installation does not install native DLLs. One shared copy
 serves all zSuite addons; zAPI source and binaries are maintained in that repository.
 
+Also copy the `z_DNumbers_Options` folder from this repository to
+`Interface/AddOns/z_DNumbers_Options`. It holds the MSBT settings editor and
+loads only the first time you open it (`/msbt`, or the MSBT page in `/zdn`).
+Without it, damage text works normally but the MSBT editor cannot open.
+
 ## Usage
 
 - `/zdn` or `/zdnumbers` opens attachment, placement, alignment, and fade settings.
@@ -120,6 +125,11 @@ crowded entries retire after reaching the boundary, not when a pending push
 would put them there.
 
 ## Performance
+
+Login stays light: the MSBT settings editor (about 330 KB of code and 170
+frames) is a separate load-on-demand addon, and the embedded Babble-Spell
+library keeps only its English names and spell icons (non-English clients fall
+back to English names).
 
 The embedded MSBT parser reuses its capture-order layouts and avoids iterator
 allocation for ordinary first-match searches. Burst queues compact once after

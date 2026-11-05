@@ -27,7 +27,7 @@ local pages={
   }},
   {name="MSBT",description="The complete embedded MSBT editor, styled to match the z suite.",items={
     {"note","All original MSBT controls are retained: profiles, fonts, incoming and outgoing events, notifications, triggers, suppressions and scroll-area positioning."},
-    {"action","Open MSBT settings",function() Z.EnsureEmbeddedMSBT(); if MSBTFrameOptions then MSBTFrameOptions:Show() end end},
+    {"action","Open MSBT settings",function() Z.LoadMSBTOptions(); if MSBTFrameOptions then MSBTFrameOptions:Show() end end},
     {"note","Use the MSBT scroll-area mover to position the static fallback for off-screen pet damage. Your existing MSBT profile is preserved."},
   }},
 }
@@ -123,7 +123,7 @@ end)
 local msbt=CreateFrame("Button",nil,frame,"UIPanelButtonTemplate")
 msbt:SetPoint("BOTTOMRIGHT",frame,"BOTTOMRIGHT",-14,14); msbt:SetWidth(140); msbt:SetHeight(24)
 msbt:SetText("MSBT settings"); UI.Button(msbt)
-msbt:SetScript("OnClick",function() Z.EnsureEmbeddedMSBT(); if MSBTFrameOptions then MSBTFrameOptions:Show() end end)
+msbt:SetScript("OnClick",function() Z.LoadMSBTOptions(); if MSBTFrameOptions then MSBTFrameOptions:Show() end end)
 function frame:Refresh()
   if not Z.config then return end
   self.updating=true

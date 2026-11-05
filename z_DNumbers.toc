@@ -2,7 +2,7 @@
 ## Title: |cff7dff33z|rDNumbers
 ## Author: zDNumbers contributors; MSBT by Mikord
 ## Notes: MSBT-powered outgoing damage attached to any visible nameplate.
-## Version: 1.0.3
+## Version: 1.1.0
 ## OptionalDeps: z_Nameplates, pfUI, SW_FixLogStrings
 ## SavedVariables: MikSBT_Save
 ## SavedVariablesPerCharacter: zDNumbersDB
@@ -25,12 +25,6 @@ MikScrollingBattleText\MikCombatEventHelper.lua
 MikScrollingBattleText\MikScrollingBattleText.lua
 MikScrollingBattleText\MikCombatEventHelper.xml
 MikScrollingBattleText\MikScrollingBattleText.xml
-
-MikScrollingBattleTextOptions\localization_options.lua
-MikScrollingBattleTextOptions\localization_options-ruRU.lua
-MikScrollingBattleTextOptions\MSBTOptions.lua
-MikScrollingBattleTextOptions\MSBTOptions.xml
-msbt_skin.lua
 
 embedded_msbt.lua
 zDNumbers.lua

@@ -98,7 +98,7 @@ function MikSBTOpt.OnEvent()
  -- When an addon is loaded.
  if (event == "ADDON_LOADED") then
   -- Make sure it's this addon.
-  if (arg1 == MikSBT.MOD_NAME) then
+  if (arg1 == MikSBT.MOD_NAME or arg1 == "z_DNumbers_Options") then
 
    -- Don't get notification for other addons being loaded.
    this:UnregisterEvent("ADDON_LOADED");
