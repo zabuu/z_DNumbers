@@ -2884,7 +2884,8 @@ function MikSBT.CommandHandler(params)
 
  -- Look for the recognized parameters.
  if (currentParam == "") then
-  -- zDNumbers embeds the options in the same addon.
+  -- zDNumbers keeps the options editor in the load-on-demand z_DNumbers_Options addon.
+  if (zDNumbers and zDNumbers.LoadMSBTOptions) then zDNumbers.LoadMSBTOptions(); end
   if (MSBTFrameOptions) then
    -- Make sure the scroll area mover control frame is not shown.
    if (not MSBTScrollAreaMoverControlFrame:IsShown()) then

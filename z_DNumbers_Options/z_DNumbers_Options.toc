@@ -1,0 +1,13 @@
+## Interface: 11200
+## Title: |cff7dff33z|rDNumbers Options
+## Notes: MSBT settings editor for zDNumbers. Loads only when you open it.
+## Author: zDNumbers contributors; MSBT by Mikord
+## Version: 1.1.0
+## Dependencies: z_DNumbers
+## LoadOnDemand: 1
+
+localization_options.lua
+localization_options-ruRU.lua
+MSBTOptions.lua
+MSBTOptions.xml
+msbt_skin.lua

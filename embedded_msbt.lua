@@ -44,3 +44,16 @@ function zDNumbers.EnsureEmbeddedMSBT()
     MikSBTOpt.EmbeddedInitialized = true
   end
 end
+
+-- The MSBT settings editor (about 330 KB of code and 170 frames) lives in the
+-- load-on-demand z_DNumbers_Options addon and loads the first time it opens.
+function zDNumbers.LoadMSBTOptions()
+  if not MSBTFrameOptions and LoadAddOn then
+    local loaded, reason = LoadAddOn("z_DNumbers_Options")
+    if not loaded and DEFAULT_CHAT_FRAME then
+      DEFAULT_CHAT_FRAME:AddMessage("|cff7dff33z|rDNumbers: MSBT settings could not load (" .. tostring(reason) .. "). Enable z_DNumbers_Options in the AddOns list.")
+    end
+  end
+  zDNumbers.EnsureEmbeddedMSBT()
+  return MSBTFrameOptions
+end

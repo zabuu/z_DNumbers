@@ -21,7 +21,7 @@ local settings={TriggerType=1,TriggerEvents={"SPELL_A","SPELL_B"},SearchPatterns
 MikSBT={CurrentProfile={Triggers={saved={TriggerSettings=settings}}},RegisterTriggers=function() registered=true end}
 UIDropDownMenu_GetSelectedValue=function(frame) return string.find(frame.name,"Stance") and 7 or 1 end
 ''')
-lua.execute((root/"MikScrollingBattleTextOptions/MSBTOptions.lua").read_text(encoding="utf-8-sig"))
+lua.execute((root/"z_DNumbers_Options/MSBTOptions.lua").read_text(encoding="utf-8-sig"))
 lua.execute('''
 MikSBTOpt.PopulateAvailableTriggerEvents=function() end
 MikSBTOpt.PopulateDropdown=function() end
